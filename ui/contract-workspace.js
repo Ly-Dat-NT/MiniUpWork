@@ -16,8 +16,8 @@ const walletLabels = {
   HOURLY_CHARGE: "Thanh toán hóa đơn theo giờ",
   HOURLY_PAYOUT: "Nhận thanh toán theo giờ",
   REVERSAL: { credit: "Nhận lại tiền giao dịch", debit: "Trả lại tiền giao dịch" },
-  CANCELLATION_PENALTY: { credit: "Nhận tiền đền hợp đồng", debit: "Khấu trừ phí hủy hợp đồng" },
-  CANCELLATION_FEE_PAYMENT: "Nhận tiền đền qua ngân hàng",
+  CANCELLATION_PENALTY: { credit: "Nhận tiền bồi thường hợp đồng", debit: "Trả tiền bồi thường hợp đồng" },
+  CANCELLATION_FEE_PAYMENT: { credit: "Nhận phần bồi thường còn thiếu", debit: "Trả phần bồi thường còn thiếu" },
 };
 let walletRequest;
 
@@ -41,7 +41,7 @@ async function loadUserWallet() {
     const amount = contractField("amount", "Số tiền nạp (USD)", "number", { min: 0.01, max: 9999999999.99, step: 0.01 });
     const submit = textElement("button", "button button-green", "Xác nhận nạp");
     submit.type = "submit";
-    form.append(textElement("p", "contract-meta", "Chuyển khoản mô phỏng. Số dư dùng cho ký quỹ và thanh toán hóa đơn theo giờ."), amount, submit);
+    form.append(textElement("p", "contract-meta", "Chuyển khoản mô phỏng vào số dư ví dùng chung."), amount, submit);
     deposit.append(form);
     const feedback = textElement("p", "notice", "");
     feedback.setAttribute("role", "status");
@@ -56,7 +56,7 @@ async function loadUserWallet() {
     let attempt = null;
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (submit.disabled || state.user !== owner || state.mode !== "client") return;
+      if (submit.disabled || state.user !== owner) return;
       const value = new FormData(form).get("amount");
       if (attempt?.amount !== value) attempt = { amount: value, reference: crypto.randomUUID() };
       submit.disabled = true;
@@ -76,7 +76,6 @@ async function loadUserWallet() {
     });
   }
 
-  panel.querySelector(".wallet-editor").hidden = state.mode !== "client";
   const controller = new AbortController();
   walletRequest = controller;
   const entries = byId("wallet-entries");
@@ -170,21 +169,24 @@ function contractHeader(item, client) {
   badges.append(textElement("span", "agreement-type", item.contract_type === "HOURLY" ? "Theo giờ" : "Trọn gói"),
     textElement("span", "agreement-id", `Hợp đồng #${item.contract_id}`), contractStatus(item.status));
   top.append(badges);
+  const canCancel = item.contract_type === "FIXED_PRICE" && ["ACTIVE", "PAUSED"].includes(item.status);
+  const controls = textElement("div", "row-actions agreement-controls", "");
   if (client) {
     const states = {
       DRAFT: [["ACTIVE", "Bắt đầu hợp đồng"], ["TERMINATED", "Kết thúc hợp đồng"]],
       ACTIVE: [["COMPLETED", "Đánh dấu hoàn thành"], ["PAUSED", "Tạm dừng"], ["TERMINATED", "Kết thúc hợp đồng"]],
       PAUSED: [["ACTIVE", "Tiếp tục"], ["TERMINATED", "Kết thúc hợp đồng"]],
     };
-    const controls = textElement("div", "row-actions agreement-controls", "");
-    controls.append(...(states[item.status] || []).map(([status, label]) => workflowAction(label, `status/${status}`)));
-    if (controls.childElementCount) top.append(controls);
-  } else if (item.contract_type === "FIXED_PRICE" && ["ACTIVE", "PAUSED"].includes(item.status)
-      && item.milestones.some((row) => !["APPROVED", "RELEASED"].includes(row.status))) {
+    controls.append(...(states[item.status] || [])
+      .filter(([status]) => !canCancel || status !== "TERMINATED")
+      .map(([status, label]) => workflowAction(label, `status/${status}`)));
+  }
+  if (canCancel) {
     const button = contractButton("Hủy hợp đồng sớm", () => showCancellationQuote(item, button));
     button.classList.add("agreement-cancel");
-    top.append(button);
+    controls.append(button);
   }
+  if (controls.childElementCount) top.append(controls);
   const parties = textElement("dl", "agreement-parties", "");
   const fields = [
     ["Khách hàng", item.company_name],
@@ -207,15 +209,23 @@ function contractHeader(item, client) {
 function cancellationValues(data) {
   const values = textElement("dl", "invoice-preview-total cancellation-values", "");
   const net = (Math.round(data.gross_payout * 100) - Math.round(data.withheld_penalty * 100)) / 100;
+  const clientCancelled = data.initiator_role === "CLIENT";
   const rows = [
+    ["Bên chủ động hủy", clientCancelled ? "Khách hàng" : "Freelancer"],
     ["Mốc đã nghiệm thu", `${data.completed_count}/${data.milestone_count}`],
-    ["Đã nhận trước khi hủy", usd.format(data.already_paid)],
+    ["Freelancer đã nhận trước khi hủy", usd.format(data.already_paid)],
     ["Ký quỹ hoàn về ví của khách hàng", usd.format(data.refunded_escrow)],
-    [`Phí hủy (${hoursFormat.format(data.rate_percent)}%)`, usd.format(data.assessed_penalty)],
-    ["Phí khấu trừ khi giải ngân", usd.format(data.withheld_penalty)],
-    [data.penalty_paid_at ? "Phí đã trả qua ngân hàng" : "Phí còn phải trả", usd.format(data.outstanding_penalty)],
-    ["Freelancer nhận thêm khi hủy", usd.format(net)],
+    [`Tiền bồi thường (${hoursFormat.format(data.rate_percent)}%)`, usd.format(data.assessed_penalty)],
   ];
+  if (data.assessed_penalty > 0) {
+    rows.push(["Ví nhận tiền bồi thường", clientCancelled ? "Freelancer" : "Khách hàng"],
+      ["Khấu trừ từ khoản giải ngân", usd.format(data.withheld_penalty)],
+      ["Trừ từ số dư ví", usd.format(data.wallet_penalty || 0)]);
+  }
+  if (data.outstanding_penalty > 0) rows.push([
+    data.penalty_paid_at ? "Phần bồi thường đã trả sau" : "Phần bồi thường còn phải trả", usd.format(data.outstanding_penalty),
+  ]);
+  rows.push(["Freelancer nhận thêm từ các mốc", usd.format(net)]);
   for (const [label, value] of rows) {
     const row = document.createElement("div");
     row.append(textElement("dt", "", label), textElement("dd", "", value));
@@ -239,11 +249,17 @@ async function showCancellationQuote(item, trigger) {
       dialog.close();
       changeContract("cancellation", { quote: quote.quote });
     }, true);
+    confirm.disabled = quote.wallet_shortfall > 0;
     const controls = textElement("div", "row-actions", "");
     controls.append(back, confirm);
-    dialog.append(title, textElement("p", "contract-meta",
-      "Phí hủy bằng 20% giá trị hợp đồng nhân với tỷ lệ mốc chưa nghiệm thu. Ký quỹ của mốc chưa nghiệm thu sẽ được hoàn, kể cả mốc đã nộp sản phẩm."),
-      cancellationValues(quote), controls);
+    const rule = quote.initiator_role === "CLIENT"
+      ? "Khách hàng bồi thường 20% giá trị hợp đồng nếu chưa có mốc được nghiệm thu. Từ một mốc đã nghiệm thu, mức bồi thường là 0."
+      : "Freelancer bồi thường 20% giá trị hợp đồng nhân với tỷ lệ mốc chưa nghiệm thu.";
+    dialog.append(title, textElement("p", "contract-meta", rule), cancellationValues(quote));
+    if (quote.wallet_shortfall > 0) {
+      dialog.append(textElement("p", "contract-meta", `Ví còn thiếu ${usd.format(quote.wallet_shortfall)}. Nạp thêm tiền rồi mở lại bảng đối soát.`));
+    }
+    dialog.append(controls);
     dialog.addEventListener("close", () => dialog.remove(), { once: true });
     contractBody.append(dialog);
     dialog.showModal();
@@ -274,11 +290,12 @@ function renderContract() {
   if (item.cancellation) {
     const receipt = workflowCard("Đối soát hủy hợp đồng");
     receipt.append(cancellationValues(item.cancellation));
-    if (!client && item.cancellation.outstanding_penalty > 0 && !item.cancellation.penalty_paid_at) {
+    const isPayer = client === (item.cancellation.initiator_role === "CLIENT");
+    if (isPayer && item.cancellation.outstanding_penalty > 0 && !item.cancellation.penalty_paid_at) {
       const actions = textElement("div", "row-actions cancellation-actions", "");
-      actions.append(contractButton("Thanh toán phí hủy", () => {
+      actions.append(contractButton("Trả bồi thường từ ví", () => {
         const amount = usd.format(item.cancellation.outstanding_penalty);
-        if (window.confirm(`Xác nhận chuyển khoản mô phỏng ${amount} để thanh toán phí hủy?`)) {
+        if (window.confirm(`Xác nhận chuyển ${amount} từ ví của bạn sang ví bên nhận bồi thường?`)) {
           changeContract("cancellation/fee-payment");
         }
       }, true));
