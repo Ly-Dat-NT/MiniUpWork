@@ -4,7 +4,7 @@ from hashlib import pbkdf2_hmac, sha256
 from hmac import compare_digest
 from secrets import token_bytes, token_urlsafe
 
-from .errors import ServiceError
+from .errors import ServiceError, conflict
 from .service import database_errors
 
 COOKIE = "rum_session"
@@ -53,6 +53,14 @@ def register(database, profile):
     return {"user_id": identity, "username": profile.username.lower()}
 
 
+def profile_skills(conn, user_id):
+    return conn.execute("""
+        SELECT fs.skill_id,s.skill_name,fs.proficiency_level
+        FROM miniupwork.freelancer_skill fs JOIN miniupwork.skill s USING (skill_id)
+        WHERE fs.freelancer_id=%s ORDER BY s.skill_name
+    """, (user_id,)).fetchall()
+
+
 @database_errors
 def freelancer_profile(database, user_id):
     with database.connection() as conn:
@@ -65,26 +73,56 @@ def freelancer_profile(database, user_id):
         """, (user_id,)).fetchone()
         if not person:
             raise ServiceError("Không tìm thấy hồ sơ freelancer.", 404, "not_found")
-        person["skills"] = conn.execute("""
-            SELECT fs.skill_id,s.skill_name,fs.proficiency_level
-            FROM miniupwork.freelancer_skill fs JOIN miniupwork.skill s USING (skill_id)
-            WHERE fs.freelancer_id=%s ORDER BY s.skill_name
-        """, (user_id,)).fetchall()
+        person["skills"] = profile_skills(conn, user_id)
     return person
 
 
 @database_errors
 def profiles(database, user_id):
     with database.connection() as conn:
+        freelancer = conn.execute("""
+            SELECT headline,overview,experience_level,default_hourly_rate,availability
+            FROM miniupwork.freelancer WHERE user_id=%s
+        """, (user_id,)).fetchone()
+        if freelancer is not None:
+            freelancer["skills"] = profile_skills(conn, user_id)
         return {
+            "account": conn.execute("""
+                SELECT u.email, u.created_at, r.avg_rating, COALESCE(r.review_count,0) AS review_count
+                FROM miniupwork.app_user u LEFT JOIN miniupwork.rating_summary r USING (user_id)
+                WHERE u.user_id=%s
+            """, (user_id,)).fetchone(),
             "client": conn.execute("""
                 SELECT company_name,description,billing_address FROM miniupwork.client WHERE user_id=%s
             """, (user_id,)).fetchone(),
-            "freelancer": conn.execute("""
-                SELECT headline,overview,experience_level,default_hourly_rate,availability
-                FROM miniupwork.freelancer WHERE user_id=%s
-            """, (user_id,)).fetchone(),
+            "freelancer": freelancer,
         }
+
+
+@database_errors
+def add_client(database, user_id, body):
+    with database.connection() as conn:
+        added = conn.execute("""
+            INSERT INTO miniupwork.client (user_id, company_name, description, billing_address)
+            VALUES (%s,%s,%s,%s) ON CONFLICT (user_id) DO NOTHING RETURNING user_id
+        """, (user_id, body.company_name, body.description, body.billing_address)).fetchone()
+        if added is None:
+            raise conflict("Tài khoản đã có hồ sơ khách hàng.")
+    return {"user_id": user_id}
+
+
+@database_errors
+def add_freelancer(database, user_id, body):
+    with database.connection() as conn:
+        added = conn.execute("""
+            INSERT INTO miniupwork.freelancer
+                (user_id, headline, overview, experience_level, default_hourly_rate, availability)
+            VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (user_id) DO NOTHING RETURNING user_id
+        """, (user_id, body.headline, body.overview, body.experience_level,
+              body.default_hourly_rate, body.availability)).fetchone()
+        if added is None:
+            raise conflict("Tài khoản đã có hồ sơ freelancer.")
+    return {"user_id": user_id}
 
 
 @database_errors

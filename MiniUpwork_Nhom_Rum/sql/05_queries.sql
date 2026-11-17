@@ -78,7 +78,7 @@ WHERE c.status = 'ACTIVE' AND m.due_date < CURRENT_DATE AND m.status NOT IN ('RE
 ORDER BY days_overdue DESC, m.milestone_id;
 
 -- HUY · Q9. Giờ chưa lập hóa đơn, theo hợp đồng và tuần UTC.
-SELECT t.contract_id, (date_trunc('week', t.start_at, 'UTC') AT TIME ZONE 'UTC')::date AS week_start,
+SELECT t.contract_id, t.billing_week AS week_start,
        u.full_name, ROUND(SUM(EXTRACT(epoch FROM t.end_at - t.start_at)) / 3600, 2) AS hours,
        ROUND(h.hourly_rate * SUM(EXTRACT(epoch FROM t.end_at - t.start_at)) / 3600, 2) AS amount
 FROM miniupwork.time_entry t JOIN miniupwork.hourly_contract h USING (contract_id)
@@ -99,7 +99,9 @@ WITH sources AS (
     SELECT contract_id, CASE WHEN escrow_funding_id IS NULL THEN 'INVOICE' ELSE 'ESCROW' END AS source_type,
            COALESCE(escrow_funding_id, invoice_id) AS source_id,
            SUM(CASE WHEN transaction_type = 'REVERSAL' THEN -amount ELSE amount END) AS net_paid
-    FROM miniupwork.payment_transaction WHERE status = 'SUCCEEDED' GROUP BY 1, 2, 3
+    FROM miniupwork.payment_transaction
+    WHERE status = 'SUCCEEDED' AND transaction_type IN ('ESCROW_RELEASE', 'HOURLY_CHARGE', 'REVERSAL')
+    GROUP BY 1, 2, 3
 )
 SELECT s.*, COALESCE(p.net_paid, 0) AS net_paid, s.amount_due - COALESCE(p.net_paid, 0) AS remaining
 FROM sources s LEFT JOIN posted p USING (contract_id, source_type, source_id)
@@ -111,5 +113,5 @@ SELECT u.username, u.full_name, date_trunc('month', t.created_at AT TIME ZONE 'U
        COUNT(DISTINCT t.contract_id) AS contracts
 FROM miniupwork.payment_transaction t JOIN miniupwork.contract c USING (contract_id)
 JOIN miniupwork.proposal p USING (proposal_id) JOIN miniupwork.app_user u ON u.user_id = p.freelancer_id
-WHERE t.status = 'SUCCEEDED'
+WHERE t.status = 'SUCCEEDED' AND t.transaction_type IN ('ESCROW_RELEASE', 'HOURLY_CHARGE', 'REVERSAL')
 GROUP BY u.user_id, month, t.currency_code ORDER BY month DESC, net_income DESC, u.username;

@@ -55,6 +55,18 @@ def database_errors(function):
         except psycopg.errors.ForeignKeyViolation:
             raise invalid("A referenced record is missing or still in use.", "invalid_reference") from None
         except psycopg.errors.CheckViolation as error:
+            if error.diag.constraint_name == "wallet_insufficient":
+                raise conflict("Số dư ví khách hàng không đủ. Vui lòng nạp thêm tiền vào ví.", "wallet_insufficient") from None
+            if error.diag.constraint_name == "bank_reference_conflict":
+                raise conflict("Mã chuyển khoản này đã được dùng cho một số tiền khác.", "bank_reference_conflict") from None
+            if error.diag.constraint_name == "cancellation_payout_reversal":
+                raise conflict("Khoản này đã được đối soát cùng phí hủy hợp đồng.", "cancellation_payout_reversal") from None
+            if error.diag.constraint_name == "billing_week_closed":
+                raise conflict("Tuần này đã có hóa đơn phát hành. Nếu đang đối soát, hãy mở lại hóa đơn trước khi ghi thêm giờ.", "billing_week_closed") from None
+            if error.diag.constraint_name == "contract_unsettled_work":
+                raise conflict("Còn giờ, hóa đơn hoặc mốc bàn giao chưa được xử lý. Vui lòng kiểm tra trước khi hoàn thành hợp đồng.", "contract_unsettled_work") from None
+            if error.diag.constraint_name in {"invoice_invalid_transition", "invoice_requires_hours"}:
+                raise conflict("Hóa đơn chưa có giờ đủ điều kiện hoặc đã đổi trạng thái.", "invoice_invalid_state") from None
             if error.diag.constraint_name == "contract_has_held_balance":
                 raise conflict("Hoàn hoặc giải ngân ký quỹ và thanh toán hóa đơn đã duyệt trước khi kết thúc hợp đồng.") from None
             if error.diag.constraint_name in _STATE_CONSTRAINTS:
@@ -316,13 +328,17 @@ class MiniUpworkService:
             self._active_profile(connection, "client", client_id)
             if job["status"] != "DRAFT":
                 raise conflict("Only a DRAFT job can be opened.")
-            if connection.execute(
-                "SELECT 1 FROM miniupwork.job_skill WHERE job_id = %s LIMIT 1", (job_id,)
-            ).fetchone() is None:
-                raise conflict("Add at least one required skill before opening the job.", "job_requires_skill")
-            connection.execute("UPDATE miniupwork.job SET status = 'OPEN' WHERE job_id = %s", (job_id,))
+            self._publish_draft(connection, job_id)
             result = self._job_document(connection, job_id)
         return result
+
+    @staticmethod
+    def _publish_draft(connection, job_id: int) -> None:
+        if connection.execute(
+            "SELECT 1 FROM miniupwork.job_skill WHERE job_id = %s LIMIT 1", (job_id,)
+        ).fetchone() is None:
+            raise conflict("Add at least one required skill before opening the job.", "job_requires_skill")
+        connection.execute("UPDATE miniupwork.job SET status = 'OPEN' WHERE job_id = %s", (job_id,))
 
     @database_errors
     def list_proposals(self, job_id: int) -> list[dict]:

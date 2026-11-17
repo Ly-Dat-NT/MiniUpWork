@@ -1,0 +1,14 @@
+.env
+.env.hosted
+.env.render
+.rum-hosted-runtime.json
+.rum-hosted-runtime.json.*.tmp
+/pages-build/
+.rum-runtime.json
+.rum-runtime.json.*.tmp
+.phase12-backup-*/
+.venv/
+__pycache__/
+*.pyc
+.report-alignment-backup-*/
+.workspace-roles-backup-*/

@@ -16,11 +16,15 @@ import uvicorn
 
 ROOT = Path(__file__).resolve().parent
 OLD_SETTINGS = Path(r"D:\CSDL\MiniUpwork_Phase4_Dat\MiniUpwork_Phase4_Dat\.env")
+SHARED_RUNTIME = Path(r"D:\CSDL\MiniUpwork_Nhom_Rum_Phase3_4\MiniUpwork_Nhom_Rum\.rum-runtime.json")
 DATABASE = "miniupwork_nhom_rum"
 SETUP_FILES = ("01_schema.sql", "02_proposal_phase3.sql", "03_contracts.sql", "04_seed_rum.sql")
 OWNER_COMMENT = "Mini-Upwork Rum local dataset"
-SCHEMA_VERSION = 3
-UPGRADES = {1: "07_phase12_upgrade.sql", 2: "09_report_alignment.sql"}
+SCHEMA_VERSION = 5
+UPGRADES = {
+    1: "07_phase12_upgrade.sql", 2: "09_report_alignment.sql", 3: "10_billing_integrity.sql",
+    4: "11_client_wallet_and_milestones.sql",
+}
 
 
 def connection_settings() -> tuple[str, str]:
@@ -57,23 +61,27 @@ def install_database(conninfo: str, password: str, database: str = DATABASE) -> 
 
         with psycopg.connect(target_dsn, password=password) as db:
             installed = db.execute("SELECT to_regclass('miniupwork.rum_installation') IS NOT NULL").fetchone()[0]
-            if not installed:
-                if existing is not None and existing[0] != OWNER_COMMENT:
-                    raise ValueError(f"Database {database} da co. Kiem tra database trong pgAdmin truoc khi cai.")
-                for name in SETUP_FILES:
-                    query = (ROOT / "sql" / name).read_text(encoding="utf-8-sig")
-                    query = re.sub(r"(?m)^BEGIN;[ \t]*$", "", query, count=1).rstrip().removesuffix("COMMIT;")
-                    db.execute(query)
-                db.execute("CREATE TABLE miniupwork.rum_installation (installed_at TIMESTAMPTZ NOT NULL DEFAULT now())")
-                db.execute("INSERT INTO miniupwork.rum_installation DEFAULT VALUES")
-            db.execute("ALTER TABLE miniupwork.rum_installation ADD COLUMN IF NOT EXISTS schema_version INT NOT NULL DEFAULT 1")
-            version = db.execute("SELECT schema_version FROM miniupwork.rum_installation").fetchone()[0]
-            if not 1 <= version <= SCHEMA_VERSION:
-                raise ValueError(f"Database dang dung luoc do phien ban {version}.")
-            while version < SCHEMA_VERSION:
-                db.execute((ROOT / "sql" / UPGRADES[version]).read_text(encoding="utf-8-sig"))
-                version += 1
-                db.execute("UPDATE miniupwork.rum_installation SET schema_version = %s", (version,))
+            if not installed and existing is not None and existing[0] != OWNER_COMMENT:
+                raise ValueError(f"Database {database} da co. Kiem tra database trong pgAdmin truoc khi cai.")
+            upgrade_schema(db, installed=installed)
+
+
+def upgrade_schema(db, *, installed):
+    if not installed:
+        for name in SETUP_FILES:
+            query = (ROOT / "sql" / name).read_text(encoding="utf-8-sig")
+            query = re.sub(r"(?m)^BEGIN;[ \t]*$", "", query, count=1).rstrip().removesuffix("COMMIT;")
+            db.execute(query)
+        db.execute("CREATE TABLE miniupwork.rum_installation (installed_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+        db.execute("INSERT INTO miniupwork.rum_installation DEFAULT VALUES")
+    db.execute("ALTER TABLE miniupwork.rum_installation ADD COLUMN IF NOT EXISTS schema_version INT NOT NULL DEFAULT 1")
+    version = db.execute("SELECT schema_version FROM miniupwork.rum_installation").fetchone()[0]
+    if not 1 <= version <= SCHEMA_VERSION:
+        raise ValueError(f"Database dang dung luoc do phien ban {version}.")
+    while version < SCHEMA_VERSION:
+        db.execute((ROOT / "sql" / UPGRADES[version]).read_text(encoding="utf-8-sig"))
+        version += 1
+        db.execute("UPDATE miniupwork.rum_installation SET schema_version = %s", (version,))
 
 
 def runtime_connection(conninfo: str, password: str, state_path: Path) -> tuple[str, str]:
@@ -111,8 +119,10 @@ def runtime_connection(conninfo: str, password: str, state_path: Path) -> tuple[
                 miniupwork.fixed_price_job, miniupwork.hourly_job, miniupwork.proposal, miniupwork.contract,
                 miniupwork.fixed_price_contract, miniupwork.hourly_contract, miniupwork.milestone,
                 miniupwork.escrow_funding, miniupwork.weekly_invoice, miniupwork.time_entry,
-                miniupwork.payment_transaction, miniupwork.review TO {role}
+                miniupwork.payment_transaction, miniupwork.review, miniupwork.fixed_cancellation,
+                miniupwork.fixed_cancellation_payout, miniupwork.fixed_cancellation_fee_payment TO {role}
         """)
+        grant("GRANT EXECUTE ON FUNCTION miniupwork.bank_top_up(BIGINT, NUMERIC, UUID) TO {role}")
         grant("GRANT UPDATE(status) ON miniupwork.job, miniupwork.milestone, miniupwork.weekly_invoice TO {role}")
         grant("GRANT UPDATE(status, end_date) ON miniupwork.contract TO {role}")
         grant("GRANT UPDATE(status, submitted_at, cover_letter, offered_amount) ON miniupwork.proposal TO {role}")
@@ -123,6 +133,8 @@ def runtime_connection(conninfo: str, password: str, state_path: Path) -> tuple[
         grant("GRANT UPDATE(invoice_id, eligibility_status) ON miniupwork.time_entry TO {role}")
         grant("GRANT DELETE ON miniupwork.app_session, miniupwork.freelancer_skill TO {role}")
         owner.commit()
+        if state.get("binding") == binding and state.get("password") == role_password:
+            return make_conninfo(conninfo, user=role), role_password
         temporary = state_path.with_name(f"{state_path.name}.{token_urlsafe(8)}.tmp")
         try:
             temporary.write_text(json.dumps({"binding": binding, "password": role_password}), encoding="utf-8")
@@ -136,7 +148,9 @@ def main() -> int:
     try:
         conninfo, password = connection_settings()
         install_database(conninfo, password)
-        conninfo, password = runtime_connection(conninfo, password, ROOT / ".rum-runtime.json")
+        local_runtime = ROOT / ".rum-runtime.json"
+        state = local_runtime if local_runtime.exists() or not SHARED_RUNTIME.exists() else SHARED_RUNTIME
+        conninfo, password = runtime_connection(conninfo, password, state)
     except (psycopg.Error, OSError, ValueError) as error:
         print(f"Chua mo duoc CSDL Mini-Upwork ({type(error).__name__}).")
         if isinstance(error, ValueError):

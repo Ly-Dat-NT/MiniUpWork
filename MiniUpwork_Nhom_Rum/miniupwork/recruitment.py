@@ -53,6 +53,40 @@ def close_job(database, job_id, client_id, target):
 
 
 @database_errors
+def repost_job(database, job_id, client_id):
+    service = MiniUpworkService(database)
+    with database.connection() as conn:
+        source = service._job(conn, job_id, lock=True)
+        check_owner(source, client_id)
+        service._active_profile(conn, "client", client_id)
+        if source["status"] != "CLOSED":
+            raise conflict("Chỉ tin đã đóng mới có thể đăng lại.")
+
+        new_id = conn.execute("""
+            INSERT INTO miniupwork.job (client_id, category_id, title, description, job_type)
+            SELECT client_id, category_id, title, description, job_type
+            FROM miniupwork.job WHERE job_id=%s RETURNING job_id
+        """, (job_id,)).fetchone()["job_id"]
+        if source["job_type"] == "FIXED_PRICE":
+            conn.execute("""
+                INSERT INTO miniupwork.fixed_price_job (job_id, budget_amount)
+                SELECT %s, budget_amount FROM miniupwork.fixed_price_job WHERE job_id=%s
+            """, (new_id, job_id))
+        else:
+            conn.execute("""
+                INSERT INTO miniupwork.hourly_job (job_id, rate_min, rate_max)
+                SELECT %s, rate_min, rate_max FROM miniupwork.hourly_job WHERE job_id=%s
+            """, (new_id, job_id))
+        conn.execute("""
+            INSERT INTO miniupwork.job_skill (job_id, skill_id, required_level)
+            SELECT %s, skill_id, required_level FROM miniupwork.job_skill WHERE job_id=%s
+        """, (new_id, job_id))
+        service._publish_draft(conn, new_id)
+        result = service._job_document(conn, new_id)
+    return result
+
+
+@database_errors
 def decide(database, proposal_id, client_id, body):
     service = MiniUpworkService(database)
     with database.connection() as conn:

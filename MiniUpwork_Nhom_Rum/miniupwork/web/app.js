@@ -18,13 +18,35 @@ const dateFormat = new Intl.DateTimeFormat("vi-VN", {
 const state = {
   params: new URLSearchParams(), offset: 0, total: 0, current: null,
   search: null, detail: null, saving: false, references: false,
-  user: null, contract: null, contractRequest: null, savingContract: false,
+  user: null, mode: null, section: null, contract: null, contractRequest: null, savingContract: false,
+  contractRows: [], contractType: "FIXED_PRICE", selectedContractId: null,
 };
 
+const apiOrigin = document.querySelector('meta[name="miniupwork-api"]').content;
+const tokenKey = `miniupwork:session:${location.pathname}:${apiOrigin}`;
+let accessToken = null;
+if (apiOrigin) {
+  try { accessToken = sessionStorage.getItem(tokenKey); } catch { /* browser storage can be disabled */ }
+}
+
+function saveAccessToken(token) {
+  accessToken = token;
+  try {
+    if (token) sessionStorage.setItem(tokenKey, token);
+    else sessionStorage.removeItem(tokenKey);
+  } catch { /* the session stays in memory */ }
+}
+
 async function request(path, options) {
-  const response = await fetch(path, options);
+  if (apiOrigin) {
+    const headers = new Headers(options?.headers);
+    if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+    options = { ...options, headers, credentials: "omit", redirect: "error" };
+  }
+  const response = await fetch(apiOrigin + path, options);
   const body = await response.json().catch(() => null);
   if (!response.ok || body === null) {
+    if (apiOrigin && response.status === 401) saveAccessToken(null);
     if (response.status === 401 && state.user) lockScreen();
     const error = new Error("API request failed");
     error.code = body?.detail?.code;
@@ -32,6 +54,8 @@ async function request(path, options) {
     error.publicMessage = body?.detail?.message;
     throw error;
   }
+  if (apiOrigin && path === "/login") saveAccessToken(body.access_token);
+  if (apiOrigin && path === "/logout") saveAccessToken(null);
   return body;
 }
 
@@ -89,12 +113,12 @@ function typeName(job) {
 function textElement(tag, className, text) {
   const element = document.createElement(tag);
   element.className = className;
-  element.textContent = text;
+  element.textContent = typeof text === "string" ? text.normalize("NFC") : text;
   return element;
 }
 
 function updateSubmit() {
-  sendButton.disabled = state.saving || !state.current || !state.user?.is_freelancer;
+  sendButton.disabled = state.saving || !canSubmit(state.current);
   sendButton.textContent = state.saving ? "Đang gửi…" : "Gửi đề xuất";
 }
 
@@ -123,8 +147,10 @@ function displayJob(job) {
   byId("job-skills").replaceChildren(...job.skills.map((skill) =>
     textElement("li", "", `${skill.skill_name} · Mức ${skill.required_level}`)));
   byId("offer-label").textContent = hourly ? "Đơn giá đề xuất (USD/giờ)" : "Tổng giá đề xuất (USD)";
-  byId("show-proposal").hidden = job.status !== "OPEN" || !state.user?.is_freelancer;
-  notice(byId("detail-message"), job.status !== "OPEN" ? "Công việc này đã ngừng nhận đề xuất." : "");
+  byId("show-proposal").hidden = !canSubmit(job);
+  const message = job.status !== "OPEN" ? "Công việc này đã ngừng nhận đề xuất."
+    : job.client_id === state.user?.user_id ? "Bạn đã đăng tin này." : "";
+  notice(byId("detail-message"), message);
   byId("job-content").hidden = false;
   updateSubmit();
 }
@@ -338,7 +364,7 @@ const rejectionMessages = {
 proposalForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const job = state.current;
-  if (!job || job.status !== "OPEN" || state.saving || !state.user?.is_freelancer) return;
+  if (!canSubmit(job) || state.saving) return;
 
   const body = {
     cover_letter: byId("letter").value.trim(),
@@ -384,8 +410,10 @@ const statusNames = {
   DRAFT: "Bản nháp", ACTIVE: "Đang thực hiện", PAUSED: "Tạm dừng", COMPLETED: "Hoàn thành",
   TERMINATED: "Đã kết thúc", PLANNED: "Chờ ký quỹ", FUNDED: "Đã ký quỹ", SUBMITTED: "Đã bàn giao",
   APPROVED: "Đã duyệt", RELEASED: "Đã giải ngân", PAID: "Đã thanh toán", ISSUED: "Đã lập hóa đơn",
+  NO_CHARGE: "Đã duyệt · Không thu tiền", VOID: "Hóa đơn đã hủy",
   DISPUTED: "Đang đối soát", REFUNDED: "Đã hoàn ký quỹ", CANCELLED: "Đã hủy",
-  ESCROW_RELEASE: "Giải ngân theo mốc", HOURLY_CHARGE: "Thanh toán theo giờ", REVERSAL: "Giao dịch bù",
+  ESCROW_RELEASE: "Giải ngân theo mốc", HOURLY_CHARGE: "Thu tiền theo giờ", REVERSAL: "Giao dịch bù",
+  ESCROW_DEPOSIT: "Nạp tiền vào ký quỹ", ESCROW_REFUND: "Hoàn ký quỹ cho khách", HOURLY_PAYOUT: "Chi trả cho freelancer",
   ELIGIBLE: "Đủ điều kiện", INELIGIBLE: "Không tính phí", OPEN: "Đang mở", CLOSED: "Đã đóng",
   PENDING: "Chờ xác nhận", SUCCEEDED: "Thành công", FAILED: "Thất bại",
   SHORTLISTED: "Qua vòng chọn lọc", ACCEPTED: "Đã chấp nhận", REJECTED: "Đã từ chối", WITHDRAWN: "Đã rút",
@@ -395,37 +423,106 @@ function formatDay(value) {
   return dateFormat.format(new Date(value.length === 10 ? `${value}T00:00:00Z` : value));
 }
 
+const workspaces = { freelancer: "Freelancer", client: "Khách hàng" };
+const accountMenu = byId("account-menu");
+
+function initials(name) {
+  return name.trim().split(/\s+/).slice(-2).map((part) => Array.from(part)[0]).join("").toLocaleUpperCase("vi");
+}
+
+function canSubmit(job) {
+  return job?.status === "OPEN" && state.mode === "freelancer" && job.client_id !== state.user?.user_id;
+}
+
+function refreshAccount(user) {
+  state.user = user;
+  byId("account-name").textContent = user.full_name;
+  byId("account-initials").textContent = initials(user.full_name);
+  byId("account-role").textContent = workspaces[state.mode];
+  for (const button of accountMenu.querySelectorAll("[data-workspace]")) {
+    const role = button.dataset.workspace;
+    button.textContent = user[`is_${role}`] ? workspaces[role]
+      : role === "client" ? "Thêm hồ sơ khách hàng" : "Thêm hồ sơ freelancer";
+    button.setAttribute("aria-pressed", String(state.mode === role));
+  }
+}
+
 function lockScreen() {
   state.user = null;
+  state.mode = null;
+  state.section = null;
   state.search?.abort();
   state.contractRequest?.abort();
   state.contract = null;
+  state.contractRows = [];
+  state.contractType = "FIXED_PRICE";
+  state.selectedContractId = null;
   state.references = false;
+  state.catalog = null;
   if (drawer.open) drawer.close();
+  accountMenu.open = false;
+  resetManagement();
+  resetProfile();
   list.replaceChildren();
   contractItems.replaceChildren();
   contractBody.replaceChildren();
+  byId("client-wallet").replaceChildren();
+  byId("client-wallet").hidden = true;
   byId("account-name").textContent = "";
-  for (const id of ["work-screen", "contract-screen", "manage-screen", "navigation", "account-bar"]) byId(id).hidden = true;
+  for (const id of ["work-screen", "contract-screen", "manage-screen", "profile-screen", "navigation", "account-bar"]) byId(id).hidden = true;
   byId("login-screen").hidden = false;
   loginForm.reset();
   byId("username").focus();
 }
 
-function showSection(section) {
+function showSection(section, { profileRole = state.mode } = {}) {
   if (!state.user) return;
-  for (const name of ["work", "contract", "manage"]) {
+  state.section = section;
+  for (const name of ["work", "contract", "manage", "profile"]) {
     byId(`${name}-screen`).hidden = section !== name;
-    byId(`${name}-nav`).toggleAttribute("aria-current", section === name);
+  }
+  const activeNav = section === "manage" ? "work" : section;
+  for (const name of ["work", "contract", "profile"]) {
+    const button = byId(`${name}-nav`);
+    if (name === activeNav) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
   }
   if (section === "contract") loadContracts();
   if (section === "manage") loadManagement();
+  if (section === "profile") loadProfile(profileRole);
+}
+
+function workspaceKey(user) {
+  return `miniupwork:workspace:${user.user_id}:${user.username}`;
+}
+
+function switchWorkspace(role) {
+  if (!state.user?.[`is_${role}`]) return;
+  accountMenu.open = false;
+  state.mode = role;
+  state.search?.abort();
+  state.contractRequest?.abort();
+  state.contract = null;
+  state.contractRows = [];
+  state.selectedContractId = null;
+  if (drawer.open) drawer.close();
+  if (!byId("profile-screen").hidden) resetProfile();
+  refreshAccount(state.user);
+  try { localStorage.setItem(workspaceKey(state.user), role); } catch { /* browser storage can be disabled */ }
+  byId("work-nav").textContent = role === "client" ? "Tuyển dụng" : "Tìm việc";
+  showSection(role === "client" ? "manage" : "work");
+  if (role === "freelancer") {
+    if (!state.references) loadReferences();
+    search();
+  }
 }
 
 function unlockScreen(user) {
   state.user = user;
-  const role = user.is_client && user.is_freelancer ? "Khách hàng và freelancer" : user.is_client ? "Khách hàng" : "Freelancer";
-  byId("account-name").textContent = `${user.full_name} · ${role}`;
+  let saved = null;
+  try { saved = localStorage.getItem(workspaceKey(user)); } catch { /* browser storage can be disabled */ }
+  const role = Object.hasOwn(workspaces, saved) && user[`is_${saved}`] ? saved
+    : user.is_freelancer ? "freelancer" : "client";
   byId("login-screen").hidden = true;
   byId("account-bar").hidden = false;
   byId("navigation").hidden = false;
@@ -433,10 +530,26 @@ function unlockScreen(user) {
   state.params = new URLSearchParams();
   updateSearchPrices();
   state.offset = 0;
-  showSection("work");
-  loadReferences();
-  search();
+  switchWorkspace(role);
 }
+
+for (const button of accountMenu.querySelectorAll("[data-workspace]")) {
+  button.addEventListener("click", () => {
+    const role = button.dataset.workspace;
+    accountMenu.open = false;
+    if (state.user?.[`is_${role}`]) switchWorkspace(role);
+    else showSection("profile", { profileRole: role });
+  });
+}
+document.addEventListener("click", (event) => {
+  if (accountMenu.open && !accountMenu.contains(event.target)) accountMenu.open = false;
+});
+accountMenu.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    accountMenu.open = false;
+    accountMenu.querySelector("summary").focus();
+  }
+});
 
 loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -475,49 +588,83 @@ byId("logout").addEventListener("click", async (event) => {
     button.disabled = false;
   }
 });
-byId("work-nav").addEventListener("click", () => showSection("work"));
+byId("work-nav").addEventListener("click", () => showSection(state.mode === "client" ? "manage" : "work"));
 byId("contract-nav").addEventListener("click", () => showSection("contract"));
-byId("manage-nav").addEventListener("click", () => showSection("manage"));
+byId("proposals-shortcut").addEventListener("click", () => showSection("manage"));
+byId("profile-nav").addEventListener("click", () => showSection("profile"));
 
 function emptyContract(message) {
   state.contractRequest?.abort();
   state.contract = null;
   contractBody.hidden = true;
-  byId("contract-title").textContent = "Chi tiết hợp đồng";
   notice(contractFeedback, message);
 }
 
 async function loadContracts() {
   const user = state.user;
+  const mode = state.mode;
+  loadClientWallet();
+  const switches = byId("contract-types").querySelectorAll("button");
+  switches.forEach((button) => { button.disabled = true; });
+  emptyContract("");
+  contractItems.replaceChildren();
+  byId("contract-count").textContent = "";
+  notice(byId("contract-list-message"), "Đang đọc danh sách hợp đồng…");
   const controller = new AbortController();
-  state.contractRequest?.abort();
   state.contractRequest = controller;
   try {
-    const rows = await request("/contracts", { signal: controller.signal });
+    const rows = await request(`/contracts?role=${mode}`, { signal: controller.signal });
     if (state.user !== user || state.contractRequest !== controller) return;
-    contractItems.replaceChildren(...rows.map((row) => {
-      const li = document.createElement("li");
-      const button = document.createElement("button");
-      button.className = "job-button";
-      button.type = "button";
-      button.dataset.contractId = row.contract_id;
-      button.setAttribute("aria-pressed", "false");
-      button.append(textElement("span", "job-meta-line", `#${row.contract_id} · ${row.contract_type === "HOURLY" ? "Theo giờ" : "Trọn gói"}`),
-        textElement("span", "job-name", row.title), textElement("span", "job-category", statusNames[row.status] || row.status));
-      button.addEventListener("click", () => selectContract(row.contract_id));
-      li.append(button);
-      return li;
-    }));
-    byId("contract-count").textContent = `${integers.format(rows.length)} hợp đồng`;
-    notice(byId("contract-list-message"), rows.length ? "" : "Bạn chưa có hợp đồng.");
-    if (rows.length) selectContract(state.contract?.contract_id || rows[0].contract_id);
-    else emptyContract("Hợp đồng sẽ xuất hiện sau khi đề xuất được chấp nhận.");
+    state.contractRows = rows;
+    switches.forEach((button) => { button.disabled = false; });
+    const selected = rows.find((row) => row.contract_id === state.selectedContractId);
+    if (selected) state.contractType = selected.contract_type;
+    else if (rows.length && !rows.some((row) => row.contract_type === state.contractType)) {
+      state.contractType = rows[0].contract_type;
+    }
+    showContractType(state.contractType, state.selectedContractId);
   } catch (error) {
     if (error.name !== "AbortError" && state.user === user) notice(byId("contract-list-message"), "Không đọc được danh sách hợp đồng.", "error");
   }
 }
 
+function showContractType(type, preferredId = null) {
+  state.contractType = type;
+  for (const button of byId("contract-types").querySelectorAll("button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.contractType === type));
+  }
+  const rows = state.contractRows.filter((row) => row.contract_type === type);
+  byId("contract-count").textContent = `${integers.format(rows.length)} hợp đồng ${type === "HOURLY" ? "theo giờ" : "trọn gói"}`;
+  contractItems.replaceChildren(...rows.map((row) => {
+    const li = document.createElement("li");
+    const button = textElement("button", "contract-option", "");
+    button.type = "button";
+    button.dataset.contractId = row.contract_id;
+    button.setAttribute("aria-pressed", "false");
+    button.append(textElement("span", "contract-option-id", `#${row.contract_id}`),
+      textElement("strong", "", row.title),
+      textElement("span", "contract-option-status", statusNames[row.status] || row.status));
+    button.addEventListener("click", () => selectContract(row.contract_id));
+    li.append(button);
+    return li;
+  }));
+  notice(byId("contract-list-message"), rows.length ? "" : "Bạn chưa có hợp đồng thuộc loại này.");
+  if (rows.length) selectContract(rows.find((row) => row.contract_id === preferredId)?.contract_id ?? rows[0].contract_id);
+  else {
+    state.selectedContractId = null;
+    emptyContract("");
+  }
+}
+
+for (const button of byId("contract-types").querySelectorAll("button")) {
+  button.addEventListener("click", () => {
+    if (button.dataset.contractType !== state.contractType) showContractType(button.dataset.contractType);
+  });
+}
+
 async function selectContract(id) {
+  if (state.selectedContractId !== id) resetContractPanel();
+  state.selectedContractId = id;
   emptyContract("Đang đọc chi tiết hợp đồng…");
   const controller = new AbortController();
   state.contractRequest = controller;
@@ -526,19 +673,28 @@ async function selectContract(id) {
   }
   try {
     const data = await request(`/contracts/${id}`, { signal: controller.signal });
-    if (state.contractRequest !== controller || controller.signal.aborted) return;
+    if (state.contractRequest !== controller || controller.signal.aborted) return false;
     state.contract = data;
+    const choice = state.contractRows.find((row) => row.contract_id === id);
+    if (choice) choice.status = data.status;
+    const label = contractItems.querySelector('[aria-pressed="true"] .contract-option-status');
+    if (label) label.textContent = statusNames[data.status] || data.status;
     renderContract();
     notice(contractFeedback);
+    return true;
   } catch (error) {
-    if (error.name !== "AbortError") notice(contractFeedback, "Không đọc được hợp đồng này.", "error");
+    if (error.name !== "AbortError" && state.contractRequest === controller) {
+      notice(contractFeedback, "Không đọc được hợp đồng này.", "error");
+    }
+    return false;
   }
 }
 
 function summaryRow(title, body, status, actions = []) {
   const li = textElement("li", "contract-row", "");
   const description = document.createElement("div");
-  description.append(textElement("strong", "", title), textElement("p", "", body), textElement("span", "job-category", status));
+  description.append(textElement("strong", "", title), textElement("p", "", body));
+  if (status) description.append(textElement("span", "job-category", status));
   li.append(description);
   if (!Array.isArray(actions)) actions = actions ? [actions] : [];
   if (actions.length) {
@@ -546,141 +702,15 @@ function summaryRow(title, body, status, actions = []) {
     for (const action of actions) {
     const button = textElement("button", "button button-outline", action.label);
     button.type = "button";
-      button.addEventListener("click", action.run || (() => changeContract(action.path)));
-      controls.append(button);
+    button.addEventListener("click", action.run || (() => changeContract(action.path)));
+    controls.append(button);
     }
     li.append(controls);
   }
   return li;
 }
 
-function contractGroup(title, rows, empty) {
-  const content = textElement("ul", "contract-items", "");
-  content.replaceChildren(...rows);
-  contractBody.append(textElement("h3", "", title), rows.length ? content : textElement("p", "contract-meta", empty));
-}
-
-function contractForm(title, path, inputs, transform = (values) => values) {
-  const details = document.createElement("details");
-  const form = textElement("form", "work-form", "");
-  details.append(textElement("summary", "", title), form);
-  for (const [name, label, type, min, max, optional] of inputs) {
-    const field = document.createElement("label");
-    const input = document.createElement(type === "textarea" ? "textarea" : "input");
-    input.name = name;
-    if (type !== "textarea") input.type = type;
-    if (min !== undefined) input.min = min;
-    if (max !== undefined) input.max = max;
-    input.required = !optional;
-    field.append(label, input);
-    form.append(field);
-  }
-  const submit = textElement("button", "button button-green", title);
-  submit.type = "submit";
-  form.append(submit);
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    changeContract(path, transform(Object.fromEntries(new FormData(form))));
-  });
-  contractBody.append(details);
-}
-
-function renderContract() {
-  const item = state.contract;
-  const hourly = item.contract_type === "HOURLY";
-  const active = item.status === "ACTIVE";
-  const client = item.client_id === state.user.user_id;
-  const rate = hourly ? `${usd.format(item.hourly_rate)} / giờ · Tối đa ${item.weekly_limit} giờ/tuần` : usd.format(item.agreed_amount);
-  const actionLabels = { fund: "Xác nhận ký quỹ", submit: "Gửi bàn giao", approve: "Duyệt mốc",
-    "prepare-release": "Giải ngân", "prepare-funding": "Ký quỹ", "cancel-funding": "Hủy ký quỹ đang chờ",
-    "request-changes": "Yêu cầu sửa", cancel: "Hủy mốc", refund: "Hoàn ký quỹ" };
-  const pending = item.payments.filter((row) => row.status === "PENDING");
-  byId("contract-title").textContent = item.title;
-  contractBody.replaceChildren(textElement("p", "contract-meta",
-    `#${item.contract_id} · ${hourly ? "Theo giờ" : "Trọn gói"} · ${statusNames[item.status]} · ${rate}`),
-    textElement("p", "contract-meta", `${item.company_name} · ${item.freelancer_name} · Từ ${formatDay(item.start_date)}`));
-
-  if (client) {
-    const stateActions = {
-      DRAFT: [["ACTIVE", "Bắt đầu hợp đồng"], ["TERMINATED", "Kết thúc hợp đồng"]],
-      ACTIVE: [["PAUSED", "Tạm dừng"], ["COMPLETED", "Đánh dấu hoàn thành"], ["TERMINATED", "Kết thúc hợp đồng"]],
-      PAUSED: [["ACTIVE", "Tiếp tục"], ["TERMINATED", "Kết thúc hợp đồng"]],
-    };
-    const controls = textElement("div", "row-actions", "");
-    for (const [status, label] of stateActions[item.status] || []) {
-      const button = textElement("button", "button button-outline", label);
-      button.type = "button";
-      button.addEventListener("click", () => changeContract(`status/${status}`));
-      controls.append(button);
-    }
-    if (controls.childElementCount) contractBody.append(controls);
-  }
-
-  if (hourly) {
-    const invoiceActions = (row) => {
-      const choices = client ? { ISSUED: [["approve", "Duyệt hóa đơn"], ["dispute", "Yêu cầu đối soát"]],
-        DISPUTED: [["reopen", "Mở lại bản nháp"]], APPROVED: pending.some((p) => p.invoice_id === row.invoice_id)
-          ? [] : [["prepare-payment", "Thanh toán hóa đơn"]] }
-        : { DRAFT: [["issue", "Gửi hóa đơn"]] };
-      return active ? (choices[row.status] || []).map(([action, label]) => ({ label, path: `invoices/${row.invoice_id}/${action}` })) : [];
-    };
-    contractGroup("Hóa đơn theo tuần", item.invoices.map((row) => summaryRow(
-      `Tuần bắt đầu ${formatDay(row.period_start)}`, row.hours === null ? "Chưa ghi nhận giờ làm" : `${row.hours} giờ · ${usd.format(row.amount)}`,
-      statusNames[row.status], invoiceActions(row))), "Chưa có hóa đơn.");
-    contractGroup("Giờ làm", item.time_entries.map((row) => summaryRow(row.description,
-      `${new Date(row.start_at).toLocaleString("vi-VN")} – ${new Date(row.end_at).toLocaleString("vi-VN")}`,
-      row.invoice_id ? `Hóa đơn #${row.invoice_id}` : statusNames[row.eligibility_status],
-      active && client && (!row.invoice_id || item.invoices.some((i) => i.invoice_id === row.invoice_id && i.status === "DRAFT")) ? { label: row.eligibility_status === "ELIGIBLE" ? "Loại khỏi hóa đơn" : "Cho phép tính phí",
-        path: `time/${row.entry_id}/${row.eligibility_status === "ELIGIBLE" ? "INELIGIBLE" : "ELIGIBLE"}` } : null)), "Chưa ghi giờ.");
-    if (active && !client) {
-      contractForm("Ghi giờ làm", "time", [["start_at", "Bắt đầu", "datetime-local"], ["end_at", "Kết thúc", "datetime-local"],
-        ["description", "Nội dung", "textarea"]], (values) => ({ ...values, start_at: new Date(values.start_at).toISOString(), end_at: new Date(values.end_at).toISOString() }));
-      contractForm("Lập hóa đơn tuần", "invoices", [["period_start", "Thứ Hai đầu tuần UTC", "date"]]);
-    }
-  } else {
-    contractGroup("Mốc bàn giao", item.milestones.map((row) => {
-      const hasFunding = row.funding_history.some((e) => e.status === "PENDING");
-      const choices = client ? {
-        PLANNED: hasFunding ? ["fund", "cancel-funding"] : ["prepare-funding", "cancel"],
-        REFUNDED: hasFunding ? ["fund", "cancel-funding"] : ["prepare-funding"], FUNDED: ["refund"],
-        SUBMITTED: ["approve", "request-changes"],
-        APPROVED: pending.some((p) => p.milestone_id === row.milestone_id) ? [] : ["prepare-release"],
-      } : { FUNDED: ["submit"] };
-      const actions = active ? (choices[row.status] || []) : [];
-      return summaryRow(`${row.sequence_no}. ${row.title}`, `${usd.format(row.amount)} · Hạn ${formatDay(row.due_date)}`, statusNames[row.status],
-        actions.map((action) => ({ label: actionLabels[action], path: `milestones/${row.milestone_id}/${action}` })));
-    }), "Chưa có mốc bàn giao.");
-    const funding = item.milestones.flatMap((m) => m.funding_history.map((e) => summaryRow(
-      `Ký quỹ #${e.funding_id} · mốc ${m.sequence_no}`, `${usd.format(m.amount)}${e.settled_at ? ` · ${formatDay(e.settled_at)}` : ""}`,
-      statusNames[e.status] || e.status)));
-    if (funding.length) contractGroup("Lịch sử ký quỹ", funding, "");
-  }
-  const paymentRows = item.payments.map((row) => {
-    const path = `payments/${row.payment_id}`;
-    const actions = [];
-    if (row.status === "PENDING" && row.payer_id === state.user.user_id) {
-      if (active || row.transaction_type === "REVERSAL") {
-        actions.push({ label: "Xác nhận thanh toán", path: `${path}/result/SUCCEEDED` });
-      }
-      actions.push({ label: "Ghi nhận thất bại", path: `${path}/result/FAILED` });
-    }
-    if (row.status === "SUCCEEDED" && row.payee_id === state.user.user_id && !row.reversed && row.transaction_type !== "REVERSAL") {
-      actions.push({ label: "Ghi giao dịch bù", path: `${path}/reverse` });
-    }
-    const id = row.original_payment_id ? `Bù cho #${row.original_payment_id}` : `#${row.payment_id}`;
-    return summaryRow(statusNames[row.transaction_type], `${id} · ${usd.format(row.amount)} · ${formatDay(row.created_at)}`,
-      statusNames[row.status], actions);
-  });
-  contractGroup("Lịch sử thanh toán", paymentRows, "Chưa có giao dịch được ghi nhận.");
-  if (item.reviews.length) contractGroup("Đánh giá", item.reviews.map((row) => summaryRow(row.reviewer, row.comment ?? "", `${row.rating}/5`)), "");
-  if (item.status === "COMPLETED" && !item.reviews.some((row) => row.reviewer_id === state.user.user_id)) {
-    contractForm("Gửi đánh giá", "reviews", [["rating", "Điểm", "number", 1, 5], ["comment", "Nhận xét (tùy chọn)", "textarea", undefined, undefined, true]],
-      (values) => ({ rating: Number(values.rating), comment: values.comment.trim() || null }));
-  }
-  contractBody.hidden = false;
-}
-
-async function changeContract(path, body) {
+async function changeContract(path, body, after) {
   const item = state.contract;
   if (!item || state.savingContract) return;
   state.savingContract = true;
@@ -691,8 +721,9 @@ async function changeContract(path, body) {
     if (body) Object.assign(options, { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const result = await request(`/contracts/${item.contract_id}/${path}`, options);
     if (state.contract === item) {
-      await selectContract(item.contract_id);
-      if (state.contract?.contract_id === item.contract_id) {
+      if (state.mode === "client") loadClientWallet();
+      after?.(result);
+      if (await selectContract(item.contract_id)) {
         const paymentStatus = statusNames[result.status];
         const message = result.payment_id
           ? `Đã ghi giao dịch #${result.payment_id}${paymentStatus ? ` · ${paymentStatus}` : ""}.`
@@ -717,4 +748,3 @@ async function initialize() {
   }
 }
 
-initialize();

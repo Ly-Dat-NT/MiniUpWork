@@ -2,19 +2,25 @@
 
 from pathlib import Path as FilePath
 from decimal import Decimal
+import os
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import accounts, contracts, recruitment
+from . import accounts, contracts, recruitment, wallet
 from .db import Database
 from .errors import ServiceError
-from .market_models import BillingWeek, ClientProfile, Decision, FreelancerProfile, Registration, Review, Skills, TimeEntry
+from .market_models import (
+    BankTopUp, BillingWeek, ClientProfile, Decision, FixedCancellation, FreelancerProfile,
+    Registration, Review, Skills, TimeEntry,
+)
 from .models import InputModel, JobCreate, Money, ProposalInput
 from .service import MiniUpworkService, database_errors
 
@@ -42,8 +48,15 @@ def using_database(request: Request) -> Database:
 Db = Annotated[Database, Depends(using_database)]
 
 
+def session_token(request: Request) -> str | None:
+    if not request.app.state.web_origin:
+        return request.cookies.get(accounts.COOKIE)
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    return token if scheme.lower() == "bearer" and len(token) <= 128 else None
+
+
 def signed_in(request: Request, db: Db) -> dict:
-    return accounts.current_user(db, request.cookies.get(accounts.COOKIE))
+    return accounts.current_user(db, session_token(request))
 
 
 User = Annotated[dict, Depends(signed_in)]
@@ -57,7 +70,21 @@ def require(user, role):
 def create_app(database: Database | None = None) -> FastAPI:
     app = FastAPI(title="Mini-Upwork · Nhóm Rum", version="1.0.0")
     app.state.database = database
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+    web_url = os.environ.get("MINIUPWORK_WEB_URL", "").strip()
+    web = urlsplit(web_url)
+    app.state.web_origin = None
+    hosts = ["127.0.0.1", "localhost"]
+    if web_url:
+        api_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME") or os.environ.get("MINIUPWORK_API_HOST", "")
+        if web.scheme != "https" or not web.hostname or web.netloc != web.hostname or web.query or web.fragment:
+            raise ValueError("MINIUPWORK_WEB_URL must be a public HTTPS frontend URL.")
+        if not api_host or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789.-" for char in api_host):
+            raise ValueError("Configure the public API hostname.")
+        app.state.web_origin = f"https://{web.hostname}"
+        hosts.append(api_host)
+        app.add_middleware(CORSMiddleware, allow_origins=[app.state.web_origin], allow_methods=["GET", "POST", "PUT"],
+                           allow_headers=["Authorization", "Content-Type"])
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
     app.mount("/ui", StaticFiles(directory=WEB), name="ui")
 
     @app.middleware("http")
@@ -77,6 +104,8 @@ def create_app(database: Database | None = None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def ui():
+        if web_url:
+            return RedirectResponse(web_url)
         return FileResponse(WEB / "index.html")
 
     @app.get("/health", tags=["Setup"])
@@ -85,7 +114,11 @@ def create_app(database: Database | None = None) -> FastAPI:
 
     @app.post("/login", tags=["Tài khoản"])
     def login(body: Credentials, request: Request, response: Response, db: Db):
-        token = accounts.login(db, body.username, body.password.get_secret_value(), request.cookies.get(accounts.COOKIE))
+        if app.state.web_origin and request.headers.get("Origin") != app.state.web_origin:
+            raise ServiceError("Hãy đăng nhập từ trang MiniUpwork.", 403, "invalid_origin")
+        token = accounts.login(db, body.username, body.password.get_secret_value(), session_token(request))
+        if app.state.web_origin:
+            return {"status": "ok", "access_token": token}
         response.set_cookie(accounts.COOKIE, token, max_age=accounts.SESSION_SECONDS, httponly=True,
                             secure=request.url.scheme == "https", samesite="strict")
         return {"status": "ok"}
@@ -106,6 +139,14 @@ def create_app(database: Database | None = None) -> FastAPI:
     def own_profile(user: User, db: Db):
         return accounts.profiles(db, user["user_id"])
 
+    @app.post("/me/profile/client", status_code=201, tags=["Tài khoản"])
+    def add_client(body: ClientProfile, user: User, db: Db):
+        return accounts.add_client(db, user["user_id"], body)
+
+    @app.post("/me/profile/freelancer", status_code=201, tags=["Tài khoản"])
+    def add_freelancer(body: FreelancerProfile, user: User, db: Db):
+        return accounts.add_freelancer(db, user["user_id"], body)
+
     @app.put("/me/profile/client", tags=["Tài khoản"])
     def update_client(body: ClientProfile, user: User, db: Db):
         require(user, "is_client")
@@ -123,8 +164,9 @@ def create_app(database: Database | None = None) -> FastAPI:
 
     @app.post("/logout", tags=["Tài khoản"])
     def logout(request: Request, response: Response, db: Db):
-        accounts.logout(db, request.cookies.get(accounts.COOKIE))
-        response.delete_cookie(accounts.COOKIE)
+        accounts.logout(db, session_token(request))
+        if not app.state.web_origin:
+            response.delete_cookie(accounts.COOKIE)
         return {"status": "ok"}
 
     @app.get("/reference-data", tags=["Công việc"])
@@ -170,6 +212,11 @@ def create_app(database: Database | None = None) -> FastAPI:
             raise ServiceError("Tin phải do chính tài khoản đăng.", 403, "forbidden")
         return MiniUpworkService(db).create_job(body)
 
+    @app.post("/me/jobs/{job_id}/repost", status_code=201, tags=["Tuyển dụng"])
+    def repost_job(job_id: ResourceId, user: User, db: Db):
+        require(user, "is_client")
+        return recruitment.repost_job(db, job_id, user["user_id"])
+
     @app.post("/me/jobs/{job_id}/{action}", tags=["Tuyển dụng"])
     def job_state(job_id: ResourceId, action: Literal["open", "close", "cancel"], user: User, db: Db):
         require(user, "is_client")
@@ -209,18 +256,46 @@ def create_app(database: Database | None = None) -> FastAPI:
         require(user, "is_freelancer")
         return MiniUpworkService(db).resubmit_proposal(proposal_id, ProposalInput(freelancer_id=user["user_id"], **body.model_dump()))
 
+    @app.get("/me/wallet", tags=["Ví khách hàng"])
+    def client_wallet(user: User, db: Db):
+        require(user, "is_client")
+        return wallet.detail(db, user["user_id"])
+
+    @app.post("/me/wallet/bank-top-ups", status_code=201, tags=["Ví khách hàng"])
+    def deposit_from_bank(body: BankTopUp, user: User, db: Db):
+        require(user, "is_client")
+        return wallet.bank_top_up(db, user["user_id"], body)
+
     @app.get("/contracts", tags=["Hợp đồng"])
-    def list_contracts(user: User, db: Db):
-        return contracts.list_contracts(db, user["user_id"])
+    def list_contracts(user: User, db: Db, role: Literal["client", "freelancer"] | None = None):
+        if role is not None:
+            require(user, f"is_{role}")
+        return contracts.list_contracts(db, user["user_id"], role=role)
 
     @app.get("/contracts/{contract_id}", tags=["Hợp đồng"])
     def get_contract(contract_id: ResourceId, user: User, db: Db):
         return contracts.contract_detail(db, contract_id, user["user_id"])
 
+    @app.get("/contracts/{contract_id}/cancellation", tags=["Hợp đồng"])
+    def cancellation_quote(contract_id: ResourceId, user: User, db: Db):
+        return contracts.cancel_fixed_contract(db, contract_id, user["user_id"])
+
+    @app.post("/contracts/{contract_id}/cancellation", tags=["Hợp đồng"])
+    def accept_cancellation(contract_id: ResourceId, body: FixedCancellation, user: User, db: Db):
+        return contracts.cancel_fixed_contract(db, contract_id, user["user_id"], expected_quote=body.quote)
+
+    @app.post("/contracts/{contract_id}/cancellation/fee-payment", tags=["Hợp đồng"])
+    def cancellation_fee(contract_id: ResourceId, user: User, db: Db):
+        return contracts.pay_cancellation_fee(db, contract_id, user["user_id"])
+
+    @app.post("/contracts/{contract_id}/milestones/{source_id}/reviews", status_code=201, tags=["Hợp đồng"])
+    def review_milestone(contract_id: ResourceId, source_id: ResourceId, body: Review, user: User, db: Db):
+        return contracts.add_review(db, contract_id, user["user_id"], body, milestone_id=source_id)
+
     @app.post("/contracts/{contract_id}/milestones/{source_id}/{action}", tags=["Hợp đồng"])
     def change_milestone(contract_id: ResourceId, source_id: ResourceId,
                          action: Literal["fund", "prepare-funding", "cancel-funding", "submit", "approve", "release",
-                                         "prepare-release", "request-changes", "refund", "cancel"],
+                                         "prepare-release", "approve-release", "request-changes", "refund", "cancel"],
                          user: User, db: Db):
         return contracts.milestone_action(db, contract_id, source_id, user["user_id"], action)
 

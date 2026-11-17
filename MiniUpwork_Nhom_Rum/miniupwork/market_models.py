@@ -2,6 +2,7 @@
 
 from datetime import date
 from typing import Literal
+from uuid import UUID
 
 from pydantic import AwareDatetime, Field, SecretStr, model_validator
 
@@ -88,3 +89,12 @@ class BillingWeek(InputModel):
 class Review(InputModel):
     rating: int = Field(ge=1, le=5, strict=True)
     comment: str | None = Field(default=None, min_length=1, max_length=3000)
+
+
+class BankTopUp(InputModel):
+    amount: Money
+    reference: UUID
+
+
+class FixedCancellation(InputModel):
+    quote: str = Field(pattern=r"^[a-f0-9]{64}$")

@@ -2,15 +2,20 @@
 
 const registration = byId("register-form");
 const newJob = byId("new-job");
-const skillForm = byId("edit-skills");
 const manageFeedback = byId("manage-message");
-const jobSkills = byId("job-skills");
+const jobSkills = byId("new-job-skills");
+const composer = byId("job-composer");
 const dialog = byId("manage-dialog");
 const dialogForm = byId("manage-dialog-form");
 const dialogFields = byId("manage-dialog-fields");
 let jobSkillCatalog = [];
-let profileSkills = [];
+let ownJobs = [];
+let jobFilter = "ALL";
 let displayedJob = null;
+
+function proposalStatus(status) {
+  return status === "SUBMITTED" ? "Đã gửi đề xuất" : statusNames[status] || status;
+}
 
 function sendJson(path, body, method = "POST") {
   const options = { method };
@@ -60,31 +65,64 @@ function catalogSelect(select, rows, id, label) {
   select.replaceChildren(new Option("Chọn…", ""), ...rows.map((row) => new Option(row[label], String(row[id]))));
 }
 
+function clearApplicants() {
+  displayedJob = null;
+  byId("applicants-title").textContent = "Đề xuất";
+  byId("applicants").replaceChildren();
+  notice(byId("applicants-message"), "Chọn một tin để xem đề xuất.");
+}
+
+function resetManagement() {
+  newJob.reset();
+  while (jobSkills.children.length > 1) jobSkills.lastElementChild.remove();
+  newJob.elements.job_type.dispatchEvent(new Event("change"));
+  composer.hidden = true;
+  ownJobs = [];
+  jobFilter = "ALL";
+  jobSkillCatalog = [];
+  for (const id of ["hiring-open", "hiring-draft", "hiring-proposals"]) byId(id).textContent = "—";
+  byId("own-jobs").replaceChildren();
+  byId("own-proposals").replaceChildren();
+  clearApplicants();
+  if (dialog.open) dialog.close();
+}
+
 async function loadManagement() {
   const user = state.user;
-  if (!user) return;
-  byId("client-tools").hidden = !user.is_client;
-  byId("freelancer-tools").hidden = !user.is_freelancer;
-  for (const id of ["own-jobs", "applicants", "own-proposals", "own-skills"]) byId(id).replaceChildren();
-  displayedJob = null;
-  byId("applicants-title").textContent = "Đề xuất cho tin";
-  notice(manageFeedback, "Đang tải công việc của bạn…");
+  const mode = state.mode;
+  const hiring = mode === "client";
+  byId("client-tools").hidden = !hiring;
+  byId("freelancer-tools").hidden = hiring;
+  byId("own-jobs").replaceChildren();
+  byId("own-proposals").replaceChildren();
+  clearApplicants();
+  notice(manageFeedback, "Đang tải…");
   try {
-    const catalog = state.catalog || await request("/reference-data");
-    if (state.user !== user) return;
-    catalogSelect(newJob.elements.category_id, categoryChoices(catalog.categories), "category_id", "category_name");
-    jobSkillCatalog = catalog.skills;
-    const selected = newJob.querySelectorAll("[name=skill_id]");
-    for (const element of [...selected, skillForm.elements.skill_id]) {
-      const previous = element.value;
-      catalogSelect(element, catalog.skills, "skill_id", "skill_name");
-      element.value = previous;
+    if (hiring) {
+      const catalog = state.catalog || await request("/reference-data");
+      if (!inManagement(user, mode)) return;
+      const category = newJob.elements.category_id;
+      const previousCategory = category.value;
+      catalogSelect(category, categoryChoices(catalog.categories), "category_id", "category_name");
+      category.value = previousCategory;
+      jobSkillCatalog = catalog.skills;
+      for (const element of newJob.querySelectorAll("[name=skill_id]")) {
+        const previousSkill = element.value;
+        catalogSelect(element, catalog.skills, "skill_id", "skill_name");
+        element.value = previousSkill;
+      }
+      await loadOwnJobs(user);
+    } else {
+      await loadFreelancer(user);
     }
-    await Promise.all([loadProfiles(user), user.is_client && loadOwnJobs(user), user.is_freelancer && loadFreelancer(user)]);
-    if (state.user === user) notice(manageFeedback);
+    if (inManagement(user, mode)) notice(manageFeedback);
   } catch (error) {
-    if (state.user === user) notice(manageFeedback, error.publicMessage || "Không thể tải dữ liệu quản lý.", "error");
+    if (inManagement(user, mode)) notice(manageFeedback, error.publicMessage || "Không thể tải dữ liệu quản lý.", "error");
   }
+}
+
+function inManagement(user, mode) {
+  return state.user === user && state.mode === mode && state.section === "manage";
 }
 
 function managedAction(label, path, body, after, method = "POST") {
@@ -92,14 +130,15 @@ function managedAction(label, path, body, after, method = "POST") {
     const button = event.currentTarget;
     button.disabled = true;
     const user = state.user;
+    const mode = state.mode;
     try {
-      await sendJson(path, body, method);
-      if (state.user === user) {
-        await after();
-        notice(manageFeedback, "Đã lưu thay đổi.", "success");
+      const result = await sendJson(path, body, method);
+      if (inManagement(user, mode)) {
+        const message = await after(result);
+        if (inManagement(user, mode)) notice(manageFeedback, message || "Đã lưu thay đổi.", "success");
       }
     } catch (error) {
-      if (state.user === user) notice(manageFeedback, error.publicMessage || "Chưa thể lưu thay đổi.", "error");
+      if (inManagement(user, mode)) notice(manageFeedback, error.publicMessage || "Chưa thể lưu thay đổi.", "error");
     } finally {
       button.disabled = false;
     }
@@ -108,29 +147,64 @@ function managedAction(label, path, body, after, method = "POST") {
 
 async function loadOwnJobs(user = state.user) {
   const jobs = await request("/me/jobs");
-  if (state.user !== user) return;
-  const rows = jobs.map((job) => {
-    const path = `/me/jobs/${job.job_id}`;
-    const actions = [{ label: "Xem đề xuất", run: () => loadApplicants(job) }];
-    const choices = job.status === "DRAFT" ? [["open", "Mở tin"], ["cancel", "Hủy tin"]]
-      : job.status === "OPEN" ? [["close", "Đóng tin"], ["cancel", "Hủy tin"]] : [];
-    for (const [key, label] of choices) actions.push(managedAction(label, `${path}/${key}`, undefined, () => loadOwnJobs(user)));
-    return summaryRow(job.title, `#${job.job_id} · ${job.proposal_count} đề xuất`, statusNames[job.status] || job.status, actions);
-  });
-  byId("own-jobs").replaceChildren(...rows);
-  if (!rows.length) byId("own-jobs").append(textElement("li", "contract-meta", "Bạn chưa có tin tuyển dụng."));
+  if (!inManagement(user, "client")) return;
+  ownJobs = jobs;
+  const open = ownJobs.filter((job) => job.status === "OPEN");
+  byId("hiring-open").textContent = integers.format(open.length);
+  byId("hiring-draft").textContent = integers.format(ownJobs.filter((job) => job.status === "DRAFT").length);
+  byId("hiring-proposals").textContent = integers.format(open.reduce((sum, job) => sum + job.proposal_count, 0));
+  renderOwnJobs();
 }
 
-async function loadApplicants(job) {
+function renderOwnJobs() {
+  const visible = ownJobs.filter((job) => jobFilter === "ALL" || job.status === jobFilter
+    || (jobFilter === "CLOSED" && job.status === "CANCELLED"));
+  for (const button of byId("job-status-filters").querySelectorAll("button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.jobState === jobFilter));
+  }
+  const rows = visible.map((job) => {
+    const path = `/me/jobs/${job.job_id}`;
+    const actions = [{ label: "Xem đề xuất", run: () => loadApplicants(job, true) }];
+    if (job.status === "CLOSED") {
+      actions.push(managedAction("Đăng lại", `${path}/repost`, undefined, async (reposted) => {
+        clearApplicants();
+        jobFilter = "OPEN";
+        await loadOwnJobs();
+        return `Đã đăng lại thành tin #${reposted.job_id}. Tin đang nhận đề xuất.`;
+      }));
+    }
+    const choices = job.status === "DRAFT" ? [["open", "Mở tin"], ["cancel", "Hủy tin"]]
+      : job.status === "OPEN" ? [["close", "Đóng tin"], ["cancel", "Hủy tin"]] : [];
+    for (const [key, label] of choices) {
+      actions.push(managedAction(label, `${path}/${key}`, undefined, async () => {
+        const current = state.user;
+        await loadOwnJobs(current);
+        if (inManagement(current, "client") && displayedJob === job.job_id) {
+          const updated = ownJobs.find((row) => row.job_id === job.job_id);
+          if (updated) await loadApplicants(updated);
+        }
+      }));
+    }
+    return summaryRow(job.title, `#${job.job_id} · ${typeName(job)} · ${job.proposal_count} đề xuất`, statusNames[job.status] || job.status, actions);
+  });
+  byId("own-jobs").replaceChildren(...rows);
+  if (!rows.length) byId("own-jobs").append(textElement("li", "contract-meta",
+    jobFilter === "ALL" ? "Bạn chưa có tin tuyển dụng." : "Chưa có tin ở trạng thái này."));
+}
+
+async function loadApplicants(job, focus = false) {
   const user = state.user;
   displayedJob = job.job_id;
-  byId("applicants-title").textContent = `Đề xuất cho tin #${job.job_id}`;
+  const heading = byId("applicants-title");
+  heading.textContent = job.title;
   byId("applicants").replaceChildren();
+  notice(byId("applicants-message"), "Đang tải đề xuất…");
+  if (focus) heading.focus();
   try {
     const rows = await request(`/me/jobs/${job.job_id}/proposals`);
-    if (state.user !== user || displayedJob !== job.job_id) return;
+    if (!inManagement(user, "client") || displayedJob !== job.job_id) return;
     const list = rows.map((proposal) => {
-      const actions = [];
+      const actions = [{ label: "Xem hồ sơ", run: () => showApplicantProfile(proposal.freelancer_id) }];
       if (job.status === "OPEN" && ["SUBMITTED", "SHORTLISTED"].includes(proposal.status)) {
         const choices = proposal.status === "SUBMITTED" ? [["SHORTLISTED", "Chọn lọc"]] : [];
         choices.push(["REJECTED", "Từ chối"]);
@@ -140,14 +214,32 @@ async function loadApplicants(job) {
         actions.push({ label: "Tạo hợp đồng", run: () => planContract(job, proposal) });
       }
       return summaryRow(`${proposal.full_name} · ${usd.format(proposal.offered_amount)}`, proposal.cover_letter,
-        statusNames[proposal.status] || proposal.status, actions);
+        proposalStatus(proposal.status), actions);
     });
     byId("applicants").replaceChildren(...list);
-    if (!list.length) byId("applicants").append(textElement("li", "contract-meta", "Tin này chưa có đề xuất."));
+    notice(byId("applicants-message"), list.length ? "" : "Tin này chưa có đề xuất.");
   } catch (error) {
-    if (state.user === user) notice(manageFeedback, error.publicMessage || "Chưa đọc được đề xuất.", "error");
+    if (inManagement(user, "client") && displayedJob === job.job_id) {
+      notice(byId("applicants-message"), error.publicMessage || "Chưa đọc được đề xuất.", "error");
+    }
   }
 }
+
+for (const button of byId("job-status-filters").querySelectorAll("button")) {
+  button.addEventListener("click", () => {
+    jobFilter = button.dataset.jobState;
+    renderOwnJobs();
+  });
+}
+
+byId("post-job").addEventListener("click", () => {
+  composer.hidden = false;
+  newJob.elements.title.focus();
+});
+byId("hide-composer").addEventListener("click", () => {
+  composer.hidden = true;
+  byId("post-job").focus();
+});
 
 newJob.elements.job_type.addEventListener("change", () => {
   const hourly = newJob.elements.job_type.value === "HOURLY";
@@ -157,7 +249,8 @@ newJob.elements.job_type.addEventListener("change", () => {
 newJob.elements.job_type.dispatchEvent(new Event("change"));
 newJob.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!state.user?.is_client) return;
+  const user = state.user;
+  if (!inManagement(user, "client")) return;
   const fields = new FormData(newJob);
   const data = Object.fromEntries(fields);
   const levels = fields.getAll("required_level");
@@ -167,7 +260,7 @@ newJob.addEventListener("submit", async (event) => {
     notice(manageFeedback, "Mỗi kỹ năng chỉ được chọn một lần.", "error");
     return;
   }
-  const body = { client_id: state.user.user_id, title: data.title, description: data.description,
+  const body = { client_id: user.user_id, title: data.title, description: data.description,
     category_id: Number(data.category_id), job_type: data.job_type, skills };
   if (data.job_type === "HOURLY") Object.assign(body, { rate_min: data.amount, rate_max: data.max_rate });
   else body.budget_amount = data.amount;
@@ -175,21 +268,25 @@ newJob.addEventListener("submit", async (event) => {
   submit.disabled = true;
   try {
     await sendJson("/me/jobs", body);
+    if (!inManagement(user, "client")) return;
     newJob.reset();
     while (jobSkills.children.length > 1) jobSkills.lastElementChild.remove();
     newJob.elements.job_type.dispatchEvent(new Event("change"));
-    await loadOwnJobs();
+    composer.hidden = true;
+    jobFilter = "DRAFT";
+    await loadOwnJobs(user);
+    byId("own-jobs-title").scrollIntoView({ block: "nearest" });
     notice(manageFeedback, "Đã lưu bản nháp. Chọn Mở tin khi muốn nhận đề xuất.", "success");
   } catch (error) {
-    notice(manageFeedback, error.publicMessage || "Kiểm tra các trường của tin tuyển dụng.", "error");
+    if (inManagement(user, "client")) notice(manageFeedback, error.publicMessage || "Kiểm tra các trường của tin tuyển dụng.", "error");
   } finally {
     submit.disabled = false;
   }
 });
 
 async function loadFreelancer(user = state.user) {
-  const [proposals, profile] = await Promise.all([request("/me/proposals"), request(`/freelancers/${user.user_id}`)]);
-  if (state.user !== user) return;
+  const proposals = await request("/me/proposals");
+  if (!inManagement(user, "freelancer")) return;
   const rows = proposals.map((p) => {
     const actions = [];
     if (["SUBMITTED", "SHORTLISTED"].includes(p.status)) {
@@ -199,32 +296,11 @@ async function loadFreelancer(user = state.user) {
       const label = p.status === "WITHDRAWN" ? "Nộp lại" : "Sửa đề xuất";
       actions.push({ label, run: () => editOffer(p, label) });
     }
-    return summaryRow(p.title, `#${p.proposal_id} · ${usd.format(p.offered_amount)}`, statusNames[p.status] || p.status, actions);
+    return summaryRow(p.title, `#${p.proposal_id} · ${usd.format(p.offered_amount)}`, proposalStatus(p.status), actions);
   });
   byId("own-proposals").replaceChildren(...rows);
   if (!rows.length) byId("own-proposals").append(textElement("li", "contract-meta", "Bạn chưa gửi đề xuất."));
-  profileSkills = profile.skills;
-  byId("profile-rating").textContent = profile.review_count ? `${profile.avg_rating}/5 · ${profile.review_count} đánh giá` : "Chưa có đánh giá.";
-  byId("own-skills").replaceChildren(...profile.skills.map((skill) => summaryRow(skill.skill_name, `Mức ${skill.proficiency_level}`, "",
-    { label: "Bỏ kỹ năng", run: () => saveSkills(profileSkills.filter((row) => row.skill_id !== skill.skill_id)) })));
 }
-
-async function saveSkills(rows) {
-  try {
-    await sendJson("/me/skills", { skills: rows.map(({ skill_id, proficiency_level }) => ({ skill_id, proficiency_level })) }, "PUT");
-    await loadFreelancer();
-    notice(manageFeedback, "Đã cập nhật kỹ năng.", "success");
-  } catch (error) {
-    notice(manageFeedback, error.publicMessage || "Chưa thể cập nhật kỹ năng.", "error");
-  }
-}
-
-skillForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  const id = Number(skillForm.elements.skill_id.value);
-  const level = Number(skillForm.elements.proficiency_level.value);
-  saveSkills([...profileSkills.filter((row) => row.skill_id !== id), { skill_id: id, proficiency_level: level }]);
-});
 
 byId("add-job-skill").addEventListener("click", () => {
   if (jobSkills.children.length >= jobSkillCatalog.length) return;
@@ -239,27 +315,6 @@ byId("add-job-skill").addEventListener("click", () => {
   jobSkills.append(row);
   select.focus();
 });
-
-async function loadProfiles(user) {
-  const profiles = await request("/me/profile");
-  if (state.user !== user) return;
-  for (const role of ["client", "freelancer"]) {
-    if (!profiles[role]) continue;
-    const form = byId(`${role}-profile`);
-    for (const [name, value] of Object.entries(profiles[role])) form.elements[name].value = value ?? "";
-  }
-}
-
-for (const [role, optional] of [["client", "billing_address"], ["freelancer", "experience_level"]]) {
-  const form = byId(`${role}-profile`);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const body = Object.fromEntries(new FormData(form));
-    body[optional] = body[optional].trim() || null;
-    await managedAction("Lưu hồ sơ", `/me/profile/${role}`, body, () => loadProfiles(state.user), "PUT")
-      .run({ currentTarget: event.submitter });
-  });
-}
 
 function dialogField(name, label, attributes = {}) {
   const field = document.createElement("label");
@@ -277,7 +332,9 @@ function openManageDialog(title, fields, save) {
   byId("manage-dialog-title").textContent = title;
   dialogFields.replaceChildren(...fields);
   notice(message);
+  submit.hidden = !save;
   dialogForm.onsubmit = async (event) => {
+    if (!save) { event.preventDefault(); return; }
     event.preventDefault();
     if (state.user !== user) { dialog.close(); return; }
     submit.disabled = true;
@@ -295,6 +352,28 @@ function openManageDialog(title, fields, save) {
 }
 
 byId("close-manage-dialog").addEventListener("click", () => dialog.close());
+
+async function showApplicantProfile(userId) {
+  const user = state.user;
+  try {
+    const profile = await request(`/freelancers/${userId}`);
+    if (!inManagement(user, "client") || dialog.open) return;
+    const rating = profile.review_count ? `${profile.avg_rating}/5 · ${profile.review_count} đánh giá` : "Chưa có đánh giá";
+    const fields = [
+      textElement("p", "applicant-headline", profile.headline),
+      textElement("p", "contract-meta", `${usd.format(profile.default_hourly_rate)}/giờ · ${rating}`),
+      textElement("p", "profile-description", profile.overview || "Chưa có phần giới thiệu."),
+    ];
+    if (profile.skills.length) {
+      const skills = textElement("ul", "skills", "");
+      skills.append(...profile.skills.map((skill) => textElement("li", "", skill.skill_name)));
+      fields.push(skills);
+    }
+    openManageDialog(profile.full_name, fields);
+  } catch (error) {
+    if (inManagement(user, "client")) notice(manageFeedback, error.publicMessage || "Chưa đọc được hồ sơ.", "error");
+  }
+}
 
 function editOffer(proposal, label) {
   const withdrawn = proposal.status === "WITHDRAWN";
@@ -348,6 +427,7 @@ function planContract(job, proposal) {
         ({ title, amount: amounts[index], due_date: dates[index] }));
     }
     await sendJson(`/me/proposals/${proposal.proposal_id}/decision`, body);
+    jobFilter = "ALL";
     await loadOwnJobs();
     await loadApplicants({ ...job, status: "CLOSED" });
   });
