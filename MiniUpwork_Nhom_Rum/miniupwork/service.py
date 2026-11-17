@@ -56,7 +56,7 @@ def database_errors(function):
             raise invalid("A referenced record is missing or still in use.", "invalid_reference") from None
         except psycopg.errors.CheckViolation as error:
             if error.diag.constraint_name == "wallet_insufficient":
-                raise conflict("Số dư ví khách hàng không đủ. Vui lòng nạp thêm tiền vào ví.", "wallet_insufficient") from None
+                raise conflict("Số dư ví không đủ để thực hiện giao dịch.", "wallet_insufficient") from None
             if error.diag.constraint_name == "bank_reference_conflict":
                 raise conflict("Mã chuyển khoản này đã được dùng cho một số tiền khác.", "bank_reference_conflict") from None
             if error.diag.constraint_name == "cancellation_payout_reversal":

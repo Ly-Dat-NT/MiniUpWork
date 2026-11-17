@@ -12,25 +12,24 @@ const walletLabels = {
   BANK_TOP_UP: "Nạp từ ngân hàng",
   ESCROW_DEPOSIT: "Chuyển tiền vào ký quỹ",
   ESCROW_REFUND: "Hoàn ký quỹ",
+  ESCROW_RELEASE: "Nhận giải ngân theo mốc",
   HOURLY_CHARGE: "Thanh toán hóa đơn theo giờ",
-  REVERSAL: "Hoàn tiền giao dịch",
-  CANCELLATION_PENALTY: "Phí hủy hợp đồng đã khấu trừ",
-  CANCELLATION_FEE_PAYMENT: "Freelancer thanh toán phí hủy",
+  HOURLY_PAYOUT: "Nhận thanh toán theo giờ",
+  REVERSAL: { credit: "Nhận lại tiền giao dịch", debit: "Trả lại tiền giao dịch" },
+  CANCELLATION_PENALTY: { credit: "Nhận tiền đền hợp đồng", debit: "Khấu trừ phí hủy hợp đồng" },
+  CANCELLATION_FEE_PAYMENT: "Nhận tiền đền qua ngân hàng",
 };
 let walletRequest;
 
-async function loadClientWallet() {
-  const panel = byId("client-wallet");
+async function loadUserWallet() {
+  const panel = byId("user-wallet");
   const owner = state.user;
   walletRequest?.abort();
-  panel.hidden = state.mode !== "client";
-  if (panel.hidden) {
-    panel.replaceChildren();
-    return;
-  }
+  if (!owner) return;
+  panel.hidden = false;
   if (!panel.firstElementChild) {
     const header = textElement("div", "wallet-header", "");
-    const heading = textElement("h2", "workflow-heading", "Ví khách hàng");
+    const heading = textElement("h2", "workflow-heading", "Ví người dùng");
     heading.id = "wallet-title";
     const balance = textElement("strong", "wallet-balance", "—");
     balance.id = "wallet-balance";
@@ -68,7 +67,7 @@ async function loadClientWallet() {
         attempt = null;
         form.reset();
         notice(feedback, "Đã nạp tiền vào ví.", "success");
-        if (state.user === owner && state.mode === "client") loadClientWallet();
+        if (state.user === owner && state.section === "contract") loadUserWallet();
       } catch (error) {
         notice(feedback, error.publicMessage || "Chưa xác nhận được giao dịch nạp tiền. Hãy thử lại.", "error");
       } finally {
@@ -77,17 +76,20 @@ async function loadClientWallet() {
     });
   }
 
+  panel.querySelector(".wallet-editor").hidden = state.mode !== "client";
   const controller = new AbortController();
   walletRequest = controller;
   const entries = byId("wallet-entries");
   try {
     const wallet = await request("/me/wallet", { signal: controller.signal });
-    if (walletRequest !== controller || state.user !== owner || state.mode !== "client") return;
+    if (walletRequest !== controller || state.user !== owner) return;
     byId("wallet-balance").textContent = usd.format(wallet.balance);
     entries.replaceChildren();
     workflowList(entries, wallet.entries.map((row) => {
       const reference = row.contract_id ? `Hợp đồng #${row.contract_id}` : `Chuyển khoản #${row.entry_id}`;
-      return summaryRow(walletLabels[row.kind], `${reference} · ${formatDay(row.created_at)}`,
+      const labels = walletLabels[row.kind];
+      const label = typeof labels === "string" ? labels : labels[row.amount > 0 ? "credit" : "debit"];
+      return summaryRow(label, `${reference} · ${formatDay(row.created_at)}`,
         `${row.amount > 0 ? "+" : ""}${usd.format(row.amount)}`);
     }), "Chưa có giao dịch.");
   } catch (error) {
@@ -208,7 +210,7 @@ function cancellationValues(data) {
   const rows = [
     ["Mốc đã nghiệm thu", `${data.completed_count}/${data.milestone_count}`],
     ["Đã nhận trước khi hủy", usd.format(data.already_paid)],
-    ["Ký quỹ hoàn về ví khách hàng", usd.format(data.refunded_escrow)],
+    ["Ký quỹ hoàn về ví của khách hàng", usd.format(data.refunded_escrow)],
     [`Phí hủy (${hoursFormat.format(data.rate_percent)}%)`, usd.format(data.assessed_penalty)],
     ["Phí khấu trừ khi giải ngân", usd.format(data.withheld_penalty)],
     [data.penalty_paid_at ? "Phí đã trả qua ngân hàng" : "Phí còn phải trả", usd.format(data.outstanding_penalty)],

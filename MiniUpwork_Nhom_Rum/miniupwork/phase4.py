@@ -256,12 +256,11 @@ def create_app(database: Database | None = None) -> FastAPI:
         require(user, "is_freelancer")
         return MiniUpworkService(db).resubmit_proposal(proposal_id, ProposalInput(freelancer_id=user["user_id"], **body.model_dump()))
 
-    @app.get("/me/wallet", tags=["Ví khách hàng"])
-    def client_wallet(user: User, db: Db):
-        require(user, "is_client")
+    @app.get("/me/wallet", tags=["Ví người dùng"])
+    def user_wallet(user: User, db: Db):
         return wallet.detail(db, user["user_id"])
 
-    @app.post("/me/wallet/bank-top-ups", status_code=201, tags=["Ví khách hàng"])
+    @app.post("/me/wallet/bank-top-ups", status_code=201, tags=["Ví người dùng"])
     def deposit_from_bank(body: BankTopUp, user: User, db: Db):
         require(user, "is_client")
         return wallet.bank_top_up(db, user["user_id"], body)

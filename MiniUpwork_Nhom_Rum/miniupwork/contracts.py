@@ -266,6 +266,7 @@ def cancel_fixed_contract(database, contract_id, user_id, *, expected_quote=None
             return json_safe(quote)
         if quote["quote"] != expected_quote:
             raise conflict("Tiến độ hoặc số tiền vừa thay đổi. Mở lại bản tính phí trước khi xác nhận.", "cancellation_quote_changed")
+        conn.execute("SELECT miniupwork.lock_contract_wallets(%s)", (contract_id,))
         if item["status"] == "PAUSED":
             # Existing settlement triggers require ACTIVE. The temporary change stays in this transaction.
             conn.execute("UPDATE miniupwork.contract SET status='ACTIVE' WHERE contract_id=%s", (contract_id,))

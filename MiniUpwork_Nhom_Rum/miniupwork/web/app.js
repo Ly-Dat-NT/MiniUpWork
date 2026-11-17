@@ -466,8 +466,8 @@ function lockScreen() {
   list.replaceChildren();
   contractItems.replaceChildren();
   contractBody.replaceChildren();
-  byId("client-wallet").replaceChildren();
-  byId("client-wallet").hidden = true;
+  byId("user-wallet").replaceChildren();
+  byId("user-wallet").hidden = true;
   byId("account-name").textContent = "";
   for (const id of ["work-screen", "contract-screen", "manage-screen", "profile-screen", "navigation", "account-bar"]) byId(id).hidden = true;
   byId("login-screen").hidden = false;
@@ -603,7 +603,7 @@ function emptyContract(message) {
 async function loadContracts() {
   const user = state.user;
   const mode = state.mode;
-  loadClientWallet();
+  loadUserWallet();
   const switches = byId("contract-types").querySelectorAll("button");
   switches.forEach((button) => { button.disabled = true; });
   emptyContract("");
@@ -721,7 +721,7 @@ async function changeContract(path, body, after) {
     if (body) Object.assign(options, { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const result = await request(`/contracts/${item.contract_id}/${path}`, options);
     if (state.contract === item) {
-      if (state.mode === "client") loadClientWallet();
+      loadUserWallet();
       after?.(result);
       if (await selectContract(item.contract_id)) {
         const paymentStatus = statusNames[result.status];
