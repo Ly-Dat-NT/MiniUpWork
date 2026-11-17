@@ -125,7 +125,7 @@
 .review-rating { color: var(--accent); font-size: 1.47rem; }
 .review-comment { white-space: pre-wrap; }
 .contract-review-form { margin-top: 16px; }
-.client-wallet { margin-bottom: 14px; }
+.user-wallet { margin-bottom: 14px; }
 .wallet-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 7px 16px; }
 .wallet-balance { color: var(--forest); font-size: 1.4rem; font-variant-numeric: tabular-nums; }
 .wallet-form input { max-width: 240px; }
