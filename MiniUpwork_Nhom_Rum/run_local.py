@@ -20,10 +20,10 @@ SHARED_RUNTIME = Path(r"D:\CSDL\MiniUpwork_Nhom_Rum_Phase3_4\MiniUpwork_Nhom_Rum
 DATABASE = "miniupwork_nhom_rum"
 SETUP_FILES = ("01_schema.sql", "02_proposal_phase3.sql", "03_contracts.sql", "04_seed_rum.sql")
 OWNER_COMMENT = "Mini-Upwork Rum local dataset"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 UPGRADES = {
     1: "07_phase12_upgrade.sql", 2: "09_report_alignment.sql", 3: "10_billing_integrity.sql",
-    4: "11_client_wallet_and_milestones.sql", 5: "12_user_wallet.sql",
+    4: "11_client_wallet_and_milestones.sql", 5: "12_user_wallet.sql", 6: "13_two_way_contract_compensation.sql",
 }
 
 

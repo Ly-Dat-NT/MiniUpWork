@@ -30,11 +30,11 @@ py -m venv .venv
 .\.venv\Scripts\python.exe run_local.py
 ```
 
-Để chạy toàn bộ phần dựng lược đồ, nâng cấp và phân quyền, dùng `run_local.py` hoặc file `.cmd` của gói. Các script `01_schema.sql` đến `04_seed_rum.sql` dựng dữ liệu ban đầu. Trình khởi động áp dụng các bản nâng cấp SQL đến `12_user_wallet.sql`. Dùng trình khởi động để nâng cấp database đang dùng.
+Để chạy toàn bộ phần dựng lược đồ, nâng cấp và phân quyền, dùng `run_local.py` hoặc file `.cmd` của gói. Các script `01_schema.sql` đến `04_seed_rum.sql` dựng dữ liệu ban đầu. Trình khởi động áp dụng các bản nâng cấp SQL đến `13_two_way_contract_compensation.sql`. Dùng trình khởi động để nâng cấp database đang dùng.
 
-Mở **Hợp đồng và thanh toán → Ví người dùng** trong cả hai chế độ. Mỗi tài khoản có một số dư và lịch sử giao dịch chung. Khách hàng có thể nạp USD mô phỏng, ký quỹ và trả hóa đơn từ ví. Freelancer nhận tiền giải ngân và tiền công theo giờ vào cùng ví. Các khoản trả cho freelancer đã hoàn tất trước khi nâng cấp được bổ sung vào lịch sử ví.
+Mở **Hợp đồng và thanh toán → Ví người dùng** trong cả hai chế độ. Mỗi tài khoản có một số dư và lịch sử giao dịch chung. Hai bên đều có thể nạp USD mô phỏng. Khách hàng ký quỹ và trả hóa đơn từ ví. Freelancer nhận tiền giải ngân và tiền công theo giờ vào cùng ví.
 
-Với hợp đồng trọn gói, hai bên có thể đánh giá 1–5 sao cho từng mốc sau khi giải ngân. Freelancer có thể xem trước đối soát khi hủy sớm. Phí hủy bằng 20% giá trị hợp đồng nhân với tỷ lệ mốc chưa nghiệm thu. Hệ thống giải ngân các mốc đã nghiệm thu, khấu trừ phí từ số tiền giải ngân lần cuối và hoàn ký quỹ của mốc chưa nghiệm thu. Tiền đền vào ví người dùng của khách hàng. Freelancer có thể trả phần phí còn thiếu bằng chuyển khoản mô phỏng trong phần đối soát.
+Với hợp đồng trọn gói, hai bên có thể đánh giá 1–5 sao cho từng mốc sau khi giải ngân. Cả hai bên có thể xem trước đối soát khi hủy sớm. Khách hàng bồi thường 20% giá trị hợp đồng nếu chưa có mốc được nghiệm thu. Từ một mốc đã nghiệm thu, khách hàng không phải bồi thường. Nếu freelancer hủy, mức bồi thường bằng 20% giá trị hợp đồng nhân với tỷ lệ mốc chưa nghiệm thu. Hệ thống thanh toán các mốc đã nghiệm thu và hoàn ký quỹ của các mốc chưa nghiệm thu, sau đó chuyển tiền bồi thường giữa hai ví. Nếu số dư còn thiếu, bên hủy nạp thêm vào ví trước khi xác nhận. Phần bồi thường còn thiếu từ các hợp đồng đã hủy trước đây có thể trả từ ví trong phần đối soát.
 
 ## Bộ dữ liệu
 

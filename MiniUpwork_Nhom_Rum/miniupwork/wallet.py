@@ -26,7 +26,7 @@ def detail(database, user_id):
 
 
 @database_errors
-def bank_top_up(database, client_id, body):
+def bank_top_up(database, user_id, body):
     with database.connection() as conn:
         return conn.execute("SELECT miniupwork.bank_top_up(%s, %s, %s) AS entry_id",
-                            (client_id, body.amount, body.reference)).fetchone()
+                            (user_id, body.amount, body.reference)).fetchone()

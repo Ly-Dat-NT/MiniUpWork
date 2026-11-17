@@ -262,7 +262,6 @@ def create_app(database: Database | None = None) -> FastAPI:
 
     @app.post("/me/wallet/bank-top-ups", status_code=201, tags=["Ví người dùng"])
     def deposit_from_bank(body: BankTopUp, user: User, db: Db):
-        require(user, "is_client")
         return wallet.bank_top_up(db, user["user_id"], body)
 
     @app.get("/contracts", tags=["Hợp đồng"])

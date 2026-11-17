@@ -19,6 +19,7 @@ _CONTRACT = """
     LEFT JOIN miniupwork.hourly_contract h USING (contract_id)
 """
 _SCOPE = "(j.client_id = %s OR p.freelancer_id = %s)"
+_MAX_CANCELLATION_RATE = Decimal("0.20")
 
 
 def get_one(conn, contract_id, user_id, *, lock=False):
@@ -200,6 +201,8 @@ def change_status(database, contract_id, user_id, status):
         item = get_one(conn, contract_id, user_id, lock=True)
         if item["client_id"] != user_id:
             raise ServiceError("Chỉ khách hàng của hợp đồng có thể đổi trạng thái.", 403, "forbidden")
+        if status == "TERMINATED" and item["contract_type"] == "FIXED_PRICE" and item["status"] in {"ACTIVE", "PAUSED"}:
+            raise conflict("Mở Hủy hợp đồng sớm để xem tiền bồi thường và xác nhận.")
         if status == "TERMINATED" and conn.execute("""
             SELECT EXISTS (
                 SELECT 1 FROM miniupwork.escrow_funding e JOIN miniupwork.milestone m USING (milestone_id)
@@ -219,7 +222,7 @@ def change_status(database, contract_id, user_id, status):
     return {"status": status}
 
 
-def fixed_cancellation_quote(conn, item):
+def fixed_cancellation_quote(conn, item, user_id):
     if item["contract_type"] != "FIXED_PRICE" or item["status"] not in {"ACTIVE", "PAUSED"}:
         raise conflict("Chỉ có thể hủy sớm hợp đồng trọn gói đang thực hiện hoặc đang tạm dừng.")
     contract_id = item["contract_id"]
@@ -229,8 +232,9 @@ def fixed_cancellation_quote(conn, item):
     """, (contract_id,)).fetchall()
     count = len(milestones)
     completed = sum(row["status"] in {"APPROVED", "RELEASED"} for row in milestones)
-    if completed == count:
-        raise conflict("Mọi mốc đã được nghiệm thu. Hãy hoàn tất quy trình thanh toán và kết thúc hợp đồng.")
+    if not count:
+        raise conflict("Hợp đồng trọn gói cần có mốc bàn giao để đối soát.")
+    client_cancelled = user_id == item["client_id"]
     zero = Decimal("0.00")
     payout = sum((row["amount"] for row in milestones if row["status"] == "APPROVED"), zero)
     refund = sum((row["amount"] for row in milestones if row["status"] in {"FUNDED", "SUBMITTED"}), zero)
@@ -239,18 +243,26 @@ def fixed_cancellation_quote(conn, item):
         FROM miniupwork.payment_transaction
         WHERE contract_id=%s AND status='SUCCEEDED' AND transaction_type IN ('ESCROW_RELEASE','REVERSAL')
     """, (contract_id,)).fetchone()["net"]
-    rate = Decimal("0.20") * (count - completed) / count
+    if client_cancelled:
+        rate = zero if completed else _MAX_CANCELLATION_RATE
+    else:
+        rate = _MAX_CANCELLATION_RATE * (count - completed) / count
     penalty = (item["agreed_amount"] * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    withheld = min(payout, penalty)
+    withheld = zero if client_cancelled else min(payout, penalty)
+    wallet_penalty = penalty - withheld
+    balance = conn.execute("SELECT balance FROM miniupwork.user_wallet WHERE user_id=%s", (user_id,)).fetchone()["balance"]
+    available = balance + refund if client_cancelled else balance
+    shortfall = max(wallet_penalty - available, zero)
     amounts = {
+        "initiator_role": "CLIENT" if client_cancelled else "FREELANCER",
         "completed_count": completed, "milestone_count": count,
         "rate_percent": (rate * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
         "already_paid": paid, "gross_payout": payout, "refunded_escrow": refund,
-        "assessed_penalty": penalty, "withheld_penalty": withheld,
+        "assessed_penalty": penalty, "withheld_penalty": withheld, "wallet_penalty": wallet_penalty,
     }
     quote = sha256(repr((contract_id, item["status"], milestones, amounts)).encode()).hexdigest()
     return {
-        **amounts, "quote": quote, "outstanding_penalty": penalty - withheld,
+        **amounts, "quote": quote, "wallet_shortfall": shortfall,
         "net_payout": payout - withheld,
     }, milestones
 
@@ -259,14 +271,15 @@ def fixed_cancellation_quote(conn, item):
 def cancel_fixed_contract(database, contract_id, user_id, *, expected_quote=None):
     with database.connection() as conn:
         item = get_one(conn, contract_id, user_id, lock=True)
-        if item["freelancer_id"] != user_id:
-            raise ServiceError("Chỉ freelancer của hợp đồng có thể dùng chức năng hủy sớm.", 403, "forbidden")
-        quote, milestones = fixed_cancellation_quote(conn, item)
+        if expected_quote is not None:
+            conn.execute("SELECT miniupwork.lock_contract_wallets(%s)", (contract_id,))
+        quote, milestones = fixed_cancellation_quote(conn, item, user_id)
         if expected_quote is None:
             return json_safe(quote)
         if quote["quote"] != expected_quote:
             raise conflict("Tiến độ hoặc số tiền vừa thay đổi. Mở lại bản tính phí trước khi xác nhận.", "cancellation_quote_changed")
-        conn.execute("SELECT miniupwork.lock_contract_wallets(%s)", (contract_id,))
+        if quote["wallet_shortfall"]:
+            raise conflict("Ví của bạn chưa đủ tiền bồi thường. Hãy nạp thêm tiền rồi xác nhận lại.", "wallet_insufficient")
         if item["status"] == "PAUSED":
             # Existing settlement triggers require ACTIVE. The temporary change stays in this transaction.
             conn.execute("UPDATE miniupwork.contract SET status='ACTIVE' WHERE contract_id=%s", (contract_id,))
@@ -298,10 +311,10 @@ def cancel_fixed_contract(database, contract_id, user_id, *, expected_quote=None
                 if status == "PLANNED":
                     conn.execute("UPDATE miniupwork.milestone SET status='CANCELLED' WHERE milestone_id=%s", (source_id,))
         conn.execute("""
-            INSERT INTO miniupwork.fixed_cancellation (contract_id, completed_count, milestone_count, rate_percent,
-                already_paid, gross_payout, refunded_escrow, assessed_penalty, withheld_penalty)
-            VALUES (%(contract_id)s, %(completed_count)s, %(milestone_count)s, %(rate_percent)s,
-                %(already_paid)s, %(gross_payout)s, %(refunded_escrow)s, %(assessed_penalty)s, %(withheld_penalty)s)
+            INSERT INTO miniupwork.fixed_cancellation (contract_id, initiator_role, completed_count, milestone_count, rate_percent,
+                already_paid, gross_payout, refunded_escrow, assessed_penalty, withheld_penalty, wallet_penalty)
+            VALUES (%(contract_id)s, %(initiator_role)s, %(completed_count)s, %(milestone_count)s, %(rate_percent)s,
+                %(already_paid)s, %(gross_payout)s, %(refunded_escrow)s, %(assessed_penalty)s, %(withheld_penalty)s, %(wallet_penalty)s)
         """, {**quote, "contract_id": contract_id})
         if quote["withheld_penalty"]:
             with conn.cursor() as cursor:
@@ -315,13 +328,14 @@ def cancel_fixed_contract(database, contract_id, user_id, *, expected_quote=None
 def pay_cancellation_fee(database, contract_id, user_id):
     with database.connection() as conn:
         item = get_one(conn, contract_id, user_id, lock=True)
-        if item["freelancer_id"] != user_id:
-            raise ServiceError("Chỉ freelancer của hợp đồng có thể thanh toán phí hủy.", 403, "forbidden")
         charge = conn.execute("""
-            SELECT outstanding_penalty FROM miniupwork.fixed_cancellation WHERE contract_id=%s
+            SELECT outstanding_penalty, initiator_role FROM miniupwork.fixed_cancellation WHERE contract_id=%s
         """, (contract_id,)).fetchone()
         if not charge or not charge["outstanding_penalty"]:
             raise conflict("Hợp đồng này không có phí hủy cần thanh toán.")
+        payer = item["client_id"] if charge["initiator_role"] == "CLIENT" else item["freelancer_id"]
+        if payer != user_id:
+            raise ServiceError("Chỉ bên chủ động hủy mới có thể thanh toán phí bồi thường.", 403, "forbidden")
         conn.execute("""
             INSERT INTO miniupwork.fixed_cancellation_fee_payment (contract_id) VALUES (%s)
             ON CONFLICT (contract_id) DO NOTHING
