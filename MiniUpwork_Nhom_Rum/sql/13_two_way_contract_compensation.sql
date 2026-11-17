@@ -91,8 +91,10 @@ CREATE FUNCTION miniupwork.require_fixed_cancellation()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
     IF OLD.contract_type = 'FIXED_PRICE' AND OLD.status IN ('ACTIVE','PAUSED') AND NEW.status = 'TERMINATED'
-       AND NOT EXISTS (SELECT 1 FROM miniupwork.fixed_cancellation WHERE contract_id = NEW.contract_id) THEN
-        RAISE EXCEPTION 'Signed fixed-price contracts require a cancellation settlement'
+       AND NOT EXISTS (
+           SELECT 1 FROM miniupwork.fixed_cancellation WHERE contract_id = NEW.contract_id AND outstanding_penalty = 0
+       ) THEN
+        RAISE EXCEPTION 'Signed fixed-price contracts require a fully funded cancellation settlement'
             USING ERRCODE = '23514', CONSTRAINT = 'fixed_cancellation_required';
     END IF;
     RETURN NEW;
